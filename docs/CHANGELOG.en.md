@@ -3,6 +3,13 @@
 Release notes are generated from the matching version section; newest first.
 For Chinese, see [CHANGELOG.md](CHANGELOG.md).
 
+## Unreleased
+
+### Fixed
+
+- The drawer's memory-trend header uses the class name the stylesheet declares, so the value aligns right.
+- When the auto-port retry also fails, the error message carries the reason from both attempts.
+
 ## 0.11.0 - 2026-09-30
 
 ### Fixed
