@@ -128,6 +128,10 @@ test('the client registers a composer-dock launcher and two overlay surfaces', (
   assert.equal(context.window.__CREATEHELPER_DSH_UTILITY_DOCK_V1__, undefined,
     'the retired page-local dock protocol stays out of the bundle')
   assert.doesNotMatch(source, /getUtilityDock|CREATEHELPER_DSH_UTILITY_DOCK/)
+
+  // 抽屉的内存走势头部依赖这个类名，样式表必须声明同一拼写。
+  assert.match(styleElement.textContent, /\.dshim-sparhead\{/)
+  assert.match(source, /className: 'dshim-sparhead'/)
 })
 
 test('0.1.7 serves preferences through configForms, which wins over a concurrent settingsScope', () => {
