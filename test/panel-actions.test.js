@@ -414,3 +414,51 @@ test('a remote row offers no diagnostics tab, since the files are local', async 
   assert.ok(labels.includes('stdout') && labels.includes('stderr'))
   assert.equal(labels.includes('Diagnostics'), false, '远端行挂上它只会读到本机同号端口的记录')
 })
+
+// 重启与停止一样是破坏性操作，因此同样两步确认。两者共用一个按行索引的确认状态，
+// 不记动作就无法分辨待确认的是哪一个按钮——这是共用状态机必须守住的那条性质。
+test('the restart button arms before restarting, on its own port', async () => {
+  const { panel, calls } = panelWithFetch()
+  await panel.flush()
+  const restart = buttonByText(panel.renderTree(), /^Restart$/)
+  assert.ok(restart, 'a stoppable non-current row must render a restart button')
+  assert.equal(restart.props.disabled, false)
+
+  restart.props.onClick({ stopPropagation() {} })
+  await panel.flush()
+  assert.equal(calls.filter((c) => /action=restart/.test(c.url)).length, 0, 'arming must not restart anything')
+  const armed = buttonByText(panel.renderTree(), /Confirm restart/)
+  assert.ok(armed, 'the first click must arm rather than restart')
+  assert.equal(armed.props.className, 'dshim-btn-warn')
+  // 待确认的只有一个动作：停止按钮不得同时进入待确认状态。
+  assert.equal(buttonByText(panel.renderTree(), /^Confirm\?$/), undefined,
+    '两个按钮共用一个确认键时，待确认的必须是被点击的那一个')
+
+  armed.props.onClick({ stopPropagation() {} })
+  await panel.flush()
+  const restartCalls = calls.filter((c) => /action=restart/.test(c.url))
+  assert.equal(restartCalls.length, 1, 'the second click performs the restart')
+  assert.equal(restartCalls[0].method, 'POST', '重启是写操作，必须 POST')
+  assert.match(restartCalls[0].url, /port=3080/, '重启的是这一行的原端口')
+})
+
+test('the restart button refuses the current instance, and says why', async () => {
+  const current = {
+    ok: true,
+    selfVersion: '0.9.10',
+    items: [{ port: 3080, managed: true, current: true, ui: true, pid: 1, startedAt: 0 }]
+  }
+  const panel = mountPanel({
+    fetchImpl: async (url) => {
+      const query = String(url).split('?')[1] || ''
+      return { json: async () => (/action=list/.test(query) ? current : { ok: true }) }
+    }
+  })
+  await panel.flush()
+  const restart = buttonByText(panel.renderTree(), /^Restart$/)
+  assert.ok(restart)
+  assert.equal(restart.props.disabled, true, '重启当前实例会带走正在服务面板的进程')
+  assert.match(restart.props.title, /never restarted from this panel/)
+  // 停止仍然可用：这两道关卡各自拒绝各自的动作。
+  assert.equal(buttonByText(panel.renderTree(), /Stop current/).props.disabled, false)
+})

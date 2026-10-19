@@ -11,7 +11,7 @@ import { buildAgentTools } from '../lib/agent-tools.js'
 const identity = (d) => d
 
 const makeApi = (over = {}) => {
-  const calls = { stop: [], logs: [], sessions: [] }
+  const calls = { stop: [], restart: [], logs: [], sessions: [] }
   const api = {
     listInstances: async () => ({
       items: [
@@ -24,6 +24,10 @@ const makeApi = (over = {}) => {
     }),
     start: async () => ({ ok: true, port: 3099, pid: 222 }),
     stop: async (port) => { calls.stop.push(port); return { ok: true, note: 'stopped :' + port } },
+    restart: async (port) => {
+      calls.restart.push(port)
+      return { ok: true, restarted: true, port, pid: 333 }
+    },
     logs: (port, stream) => { calls.logs.push([port, stream]); return { exists: true, truncated: false, lines: ['a', 'b'] } },
     sessions: async (port) => {
       calls.sessions.push(port)
@@ -40,11 +44,11 @@ const makeApi = (over = {}) => {
 
 const byName = (defs) => Object.fromEntries(defs.map((d) => [d.name, d]))
 
-test('buildAgentTools exposes the five instance tools with registry-ready shapes', () => {
+test('buildAgentTools exposes the six instance tools with registry-ready shapes', () => {
   const { api } = makeApi()
   const tools = byName(buildAgentTools(identity, api))
   assert.deepEqual(Object.keys(tools).sort(), [
-    'instance_list', 'instance_logs', 'instance_sessions', 'instance_start', 'instance_stop'
+    'instance_list', 'instance_logs', 'instance_restart', 'instance_sessions', 'instance_start', 'instance_stop'
   ])
   for (const def of Object.values(tools)) {
     assert.equal(typeof def.description, 'string')
@@ -126,6 +130,43 @@ test("instance_stop surfaces the host's desktop refusal unchanged", async () => 
   // 渲染行优先使用 `error` 而不是 `code`，因此人看到的是宿主自己的措辞，而不是一个
   // 光秃秃的 code。
   assert.match(stopDef.output.render({ port: 19387 }, r)[0].text, /desktop host/)
+})
+
+// 端口窗口期是重启的真实性质，因此工具描述必须写明它：模型只在描述里读到
+// "restart" 时，无从知道停止与启动之间端口是空的、被抢占就失败。
+test('instance_restart describes the port window and never promises another port', async () => {
+  const { api } = makeApi()
+  const def = byName(buildAgentTools(identity, api)).instance_restart
+  assert.match(def.description, /same port/)
+  assert.match(def.description, /empty/)
+  assert.match(def.description, /port_in_use/)
+  assert.match(def.description, /never moves to another port/)
+})
+
+test('instance_restart forwards foreign ports, validates its argument, and reports the new pid', async () => {
+  const { api, calls } = makeApi()
+  const def = byName(buildAgentTools(identity, api)).instance_restart
+
+  const v = await def.execute({ port: 3099 })
+  assert.deepEqual(calls.restart, [3099])
+  assert.deepEqual(v, { ok: true, restarted: true, port: 3099, pid: 333 })
+  assert.match(def.output.render({}, v)[0].text, /restarted on port 3099 \(pid 333\)/)
+
+  for (const bad of [0, -1, 70000, 1.5, '3080', '../'.repeat(8) + 'Windows/win.ini']) {
+    const r = await def.execute({ port: bad })
+    assert.equal(r.ok, false, 'port ' + JSON.stringify(bad) + ' must be rejected')
+    assert.equal(r.code, 'bad_port')
+  }
+  assert.deepEqual(calls.restart, [3099], 'invalid ports never reach the api')
+})
+
+test("instance_restart surfaces the host's refusals and window failures unchanged", async () => {
+  const refused = { ok: false, code: 'port_still_in_use', port: 3099, error: 'the port is still taken' }
+  const { api } = makeApi({ restart: async () => refused })
+  const def = byName(buildAgentTools(identity, api)).instance_restart
+  const r = await def.execute({ port: 3099 })
+  assert.deepEqual(r, refused, '宿主是端口归属与窗口的判定方，理由原样透传')
+  assert.match(def.output.render({}, r)[0].text, /restart failed: the port is still taken/)
 })
 
 test('instance_logs rejects a non-port before it can be forwarded to a peer', async () => {

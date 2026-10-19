@@ -32,6 +32,7 @@ import {
   summarizeSessions,
   orderInstances,
   awaitChild,
+  awaitPortFree,
   managedLocalPorts,
   diffManagedPorts,
   parsePortSpec,
@@ -535,6 +536,49 @@ test('summarizeSessions caps at N newest rows', () => {
   const rows = summarizeSessions(many, 20)
   assert.equal(rows.length, 20)
   assert.equal(rows[0].id, 's29', 'cap keeps the NEWEST rows')
+})
+
+test('awaitPortFree waits for the listener to settle and never returns a busy port', async () => {
+  // 时钟由测试注入：结论必须是「端口确实空出来了」，而不是「等够了这么久」。
+  let probes = 0
+  const sleeping = []
+  const sleep = () => new Promise((resolve) => { sleeping.push(resolve) })
+  const nextTurn = () => new Promise((resolve) => setImmediate(resolve))
+  const wakeOne = async () => {
+    const w = sleeping.shift()
+    assert.ok(w, 'the wait loop must be sleeping on its injected clock')
+    w()
+    await nextTurn()
+  }
+  let now = 0
+  const clock = () => now
+  // 第三次探测才空出来：模拟优雅退出刷写会话之后监听器才结算。
+  const available = async (port) => {
+    probes += 1
+    assert.equal(port, 3080)
+    return probes >= 3
+  }
+  const pending = awaitPortFree({ port: 3080, available, timeoutMs: 10_000, sleep, now: clock })
+  assert.equal(await nextTurn(), undefined)
+  await wakeOne()
+  await wakeOne()
+  assert.equal(await pending, true, '端口空出来就立即返回，不把窗口用尽')
+  assert.equal(probes, 3)
+})
+
+test('awaitPortFree answers false when the port is never released', async () => {
+  let probes = 0
+  let slept = 0
+  const clock = { value: 0 }
+  const pending = awaitPortFree({
+    port: 3080,
+    available: async () => { probes += 1; return false },
+    timeoutMs: 1000,
+    sleep: async () => { slept += 1; clock.value += 300 },
+    now: () => clock.value
+  })
+  assert.equal(await pending, false, '窗口用尽时必须如实报告端口仍在使用')
+  assert.ok(probes >= 2 && slept >= 1, '它确实轮询过，而不是一次就放弃')
 })
 
 // ---- 诊断记录的实例归属 --------------------------------------------------

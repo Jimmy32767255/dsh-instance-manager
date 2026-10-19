@@ -21,9 +21,10 @@ DSH Web 的实例管理器。它为本机可见的每个 dsh web 实例显示一
 - 启动新实例：端口留空时取起始端口段内第一个空闲端口；指定端口已被占用时报错，不改用其他端口。
 - 打开实例：点击某行的 `:端口` 进入该实例界面；启动 token 由宿主即时换取，不进入面板状态与链接。
 - 停止实例：单个、当前或全部本地实例；远程行只读，也不参与 stop-all。
+- 原地重启：在**同一端口**重启某个本地实例，无需手动 stop + start 两步。
 - 每个实例的只读视图：stdout/stderr 日志、会话概要，该实例正在运行的内容，以及诊断记录（崩溃黑匣子、自退出记录、写操作追踪）。
 - 远程实例：配置 peer 后可查看远程实例及其日志与会话。
-- Agent 工具：`instance_list`、`instance_start`、`instance_stop`、`instance_logs`、`instance_sessions`。
+- Agent 工具：`instance_list`、`instance_start`、`instance_stop`、`instance_restart`、`instance_logs`、`instance_sessions`。
 - web 面板中的启动会向浏览器交接一次性 token URL 以换取浏览器 cookie，Agent 工具启动与桌面端启动都保持后台无窗口（启动参数带 `--no-open`）。
 
 ## 安装
@@ -144,6 +145,16 @@ $env:DSHIM_FLEET_TOKEN_REF = 'DSHIM_FLEET_TOKEN'       # 存放 token 的环境�
 - 诊断面只接受本机回环请求，且不做 fleet 转发：持有有效 fleet bearer 的对端与受信局域网浏览器都读不到它。远端行因此没有这个标签。
 - 崩溃记录的筛选保留整条记录（头与异常栈），因此栈不会落到另一个实例名下。
 - 这三份文件从未被读取也从未被清理；诊断面只读，不删除、不改写。
+
+## 原地重启
+
+实例行的「重启」按钮与 agent 工具 `instance_restart` 在**同一端口**重启一个本地实例，替代手动 stop + start 两步。步骤固定为：转发停止（目标经自己的 `appExit` 优雅退出，会话落盘）→ 轮询等待端口真正空出来 → 在该端口启动 → 等它应答 `action=self`。
+
+- **stop 与 start 之间端口是空的。** 窗口期内被别的进程抢到，重启失败并返回 `port_in_use`；端口在 15 秒内仍未释放则返回 `port_still_in_use`，两种情况都不会启动到其他端口——用户要的就是原端口重启，换端口等于换了一个实例。
+- 不重启当前实例：提供面板的进程会随重启一起离开，浏览器只会看到一次失败的点击。请手动重启本机 dsh。
+- 不重启桌面宿主，与停止操作的理由相同。
+- 远端行不可重启。
+- 面板触发的重启把启动 token 交接给浏览器，新实例因此能直接打开；agent 工具触发的重启保持无头（启动参数带 `--no-open`）。
 
 ## 开发
 

@@ -7,6 +7,7 @@ For Chinese, see [CHANGELOG.md](CHANGELOG.md).
 
 ### Added
 
+- An instance row gains a Restart button and there is a new `instance_restart` tool: both restart a local instance on the same port, with the port empty between the stop and the start, failing on a grab and never moving elsewhere. The current instance and the desktop host are never restarted.
 - The instance drawer gains a Diagnostics tab that lists that instance's crash black box, self-exit log and mutation trace, scoped by pid and instance port; all three files previously had a write path only. The surface accepts local loopback requests only, is never forwarded over fleet, and remote rows do not carry it.
 
 ### Fixed

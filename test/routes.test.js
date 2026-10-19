@@ -521,10 +521,10 @@ const stubToolsResolution = (home) => {
 const mountTools = async ({ config, port }) => {
   const registered = []
   const { dispose } = mount({ config, port, tools: { register: (def) => { registered.push(def) } } })
-  // mountAgentTools 异步解析模块：等待五个定义完成注册，而不是假定 apply 返回时已经
+  // mountAgentTools 异步解析模块：等待定义完成注册，而不是假定 apply 返回时已经
   // 注册完毕。
   const deadline = Date.now() + 3000
-  while (registered.length < 5 && Date.now() < deadline) {
+  while (registered.length < 6 && Date.now() < deadline) {
     await new Promise((resolve) => setTimeout(resolve, 10))
   }
   return { registered, dispose }
@@ -627,6 +627,134 @@ test('the agent stop tool refuses a desktop target and never forwards it', async
       try {
         const def = registered.find((d) => d.name === 'instance_stop')
         assert.ok(def, '停止工具已注册到假服务')
+        return { out: await def.execute({ port }), seen: [...seen] }
+      } finally {
+        dispose()
+      }
+    })
+    assert.equal(desktop.out.ok, false)
+    assert.equal(desktop.out.code, 'stop_desktop_refused')
+    assert.equal(desktop.seen.some((u) => u.includes('stop-self')), false)
+  })
+})
+
+// ---- action=restart（同一端口原地重启）-------------------------------------
+// 顺序是契约：转发 stop → 端口真正空出来 → 同端口启动。三步任何一步被跳过，得到的
+// 都不是"原端口重启"——换端口等于换了一个实例。
+//
+// 假实例可以真实地停机：转发 stop-self 之后关闭自己的监听器，这与优雅退出在端口上的
+// 表现相同，因此后面的端口等待与同端口启动跑的是真实路径。
+const withRestartableTarget = async (opts, fn) => {
+  const http = await import('node:http')
+  const seen = []
+  const server = http.createServer((req, res) => {
+    const url = String(req.url)
+    seen.push(url)
+    res.writeHead(200, { 'content-type': 'application/json' })
+    res.end(JSON.stringify({ ok: true, pid: 7, port: server.address().port, runtime: 'node' }))
+    if (url.includes('action=stop-self')) {
+      // 优雅退出：应答之后监听器才结算。这里同步关闭，让端口等待看到真实的释放过程。
+      setImmediate(() => server.close())
+    }
+  })
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
+  try {
+    return await fn({ port: server.address().port, seen })
+  } finally {
+    try { server.closeAllConnections() } catch (e) { }
+    await new Promise((resolve) => server.close(resolve))
+  }
+}
+
+test('action=restart forwards the stop, waits for the port, and launches on the same port', async () => {
+  await withTempHome(async ({ home }) => {
+    // 一个可解析的启动器：重启必须真的走到派生那一步，而不是停在 no_dsh_bin 上。
+    stubToolsResolution(home)
+    const r = await withRestartableTarget({}, async ({ port, seen }) => {
+      const out = await callApiFull({
+        query: 'action=restart&port=' + port,
+        method: 'POST',
+        remoteAddress: '127.0.0.1',
+        config: { startup: { portRange: String(port) } },
+        port: 3600
+      })
+      return { out, seen: [...seen], port }
+    })
+    assert.equal(r.out.status, 200)
+    assert.equal(r.seen.filter((u) => u.includes('action=stop-self')).length, 1,
+      '停止必须先转发，让目标经自己的 appExit 优雅退出')
+    // 同端口启动：启动器日志按端口命名，因此文件存在即证明派生发生在同一个端口上。
+    assert.equal(fs.existsSync(path.join(home, 'launcher', 'logs', 'server-' + r.port + '.out.log')), true,
+      '重启必须在原端口派生新实例')
+    assert.equal(r.out.json.port, r.port, '端口不变：换端口等于换了一个实例')
+  })
+})
+
+test('action=restart refuses the current instance without forwarding anything', async () => {
+  const r = await callApiFull({
+    query: 'action=restart&port=3600',
+    method: 'POST',
+    remoteAddress: '127.0.0.1',
+    port: 3600
+  })
+  assert.equal(r.status, 200)
+  assert.equal(r.json.ok, false)
+  assert.equal(r.json.code, 'restart_current_refused',
+    '提供面板的进程会随重启一起离开，用户看到的只会是一次失败的点击')
+})
+
+test('action=restart refuses a desktop target without forwarding anything', async () => {
+  const r = await withFakeTarget({ self: (port) => ({ ok: true, pid: 4242, port, runtime: 'desktop' }) }, async ({ port, seen }) => {
+    const out = await callApi('action=restart&port=' + port, 'POST')
+    return { out, seen: [...seen] }
+  })
+  assert.equal(r.out.status, 200)
+  assert.equal(r.out.json.code, 'stop_desktop_refused')
+  assert.equal(r.seen.some((u) => u.includes('stop-self')), false, 'a refused restart is never forwarded')
+})
+
+test('action=restart reports an unconfirmed stop instead of starting a second instance', async () => {
+  const r = await withFakeTarget({ self: (port) => ({ ok: true, pid: 7, port, runtime: 'node' }), ack: { ok: false } }, async ({ port, seen }) => {
+    const out = await callApi('action=restart&port=' + port, 'POST')
+    return { out, seen: [...seen] }
+  })
+  assert.equal(r.out.json.ok, false)
+  assert.equal(r.out.json.code, 'stop_unconfirmed',
+    '目标没有确认停止时不得启动第二个实例占住同一端口')
+})
+
+test('action=restart requires POST and a usable port', async () => {
+  const get = await callApi('action=restart&port=3080', 'GET')
+  assert.equal(get.status, 405)
+  assert.equal(get.json.code, 'need_post')
+  assert.match(get.json.error, /restart/, '回显被拒绝的 action')
+  for (const bad of [TRAVERSAL, '80.5', '1e3', '0', '65536', 'abc', '']) {
+    const r = await callApi('action=restart&port=' + encodeURIComponent(bad), 'POST')
+    assert.equal(r.status, 400, 'port=' + bad)
+    assert.equal(r.json.code, 'no_port', 'port=' + bad)
+  }
+})
+
+test('the agent restart tool refuses the current instance and a desktop target', async () => {
+  await withTempHome(async ({ home }) => {
+    stubToolsResolution(home)
+    const current = await mountTools({ config: { startup: { portRange: '3600' } }, port: 3600 })
+    try {
+      const def = current.registered.find((d) => d.name === 'instance_restart')
+      assert.ok(def, '重启工具已注册到假服务')
+      const self = await def.execute({ port: 3600 })
+      assert.equal(self.ok, false)
+      assert.equal(self.code, 'restart_current_refused')
+      assert.equal((await def.execute({ port: 0 })).code, 'bad_port')
+      assert.equal((await def.execute({ port: 70000 })).code, 'bad_port')
+    } finally {
+      current.dispose()
+    }
+
+    const desktop = await withFakeTarget({ self: (port) => ({ ok: true, pid: 4242, port, runtime: 'desktop' }) }, async ({ port, seen }) => {
+      const { registered, dispose } = await mountTools({ config: { startup: { portRange: String(port) } }, port: 3600 })
+      try {
+        const def = registered.find((d) => d.name === 'instance_restart')
         return { out: await def.execute({ port }), seen: [...seen] }
       } finally {
         dispose()
