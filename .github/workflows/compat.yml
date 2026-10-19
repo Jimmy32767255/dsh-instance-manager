@@ -100,8 +100,19 @@ jobs:
         # plugin take different code paths there. Both paths are covered by unit
         # tests; this job is what proves the pair works against a real host.
         #
-        # 0.2.0-rc.1 is the newest anchor: the plugin-facing APIs this plugin reads are unchanged since 0.1.7-rc.2.
-        dsh-spec: ['@0.1.5-rc.3', '@0.1.7-rc.2', '@0.2.0-rc.1']
+        # 0.2.0-rc.1 kept the plugin-facing APIs this plugin reads unchanged
+        # from 0.1.7-rc.2.
+        #
+        # 0.2.1-rc.2 is the newest anchor. It adds TLS and a `getOrigin()` to
+        # the webserver, adds the /connect route and v2 API cookies to the
+        # Connection carrier, and makes the plugin preflight read `engines.dsh`
+        # before peerDependencies when both are present. None of these touch the
+        # surface this plugin reads — `webServer.register`/`registerUpgrade`/`port`,
+        # `connection.requestRejection`, `tools.register`, `sessions.list`,
+        # `locale`, `slots`, `credentials.resolve`, `dshHomePath`, `appExit` —
+        # and the plugin's own `engines.dsh` and `@deepseek-ai/dsh` peer carry
+        # the same unbounded range, so the preflight's order change is neutral.
+        dsh-spec: ['@0.1.5-rc.3', '@0.1.7-rc.2', '@0.2.0-rc.1', '@0.2.1-rc.2']
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v5
