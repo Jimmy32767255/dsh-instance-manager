@@ -740,6 +740,130 @@ test('action=sessions rejects an unknown peer instead of falling back to local',
   assert.equal(r.json.code, 'unknown_peer')
 })
 
+// ---- action=diagnostics ---------------------------------------------------
+// 崩溃黑匣子、自退出与写操作追踪此前只有写入路径。三份文件由本机所有实例共用，读取
+// 必须按实例归属筛选，而且端口在这里同样会拼进文件名——校验与 logs 一样不可省。
+
+const withDiagnosticLogs = async (files, fn) => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'dshim-diag-'))
+  const savedHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  try {
+    const dir = path.join(home, 'launcher', 'logs')
+    fs.mkdirSync(dir, { recursive: true })
+    for (const [name, content] of Object.entries(files)) {
+      fs.writeFileSync(path.join(dir, name), content)
+    }
+    return await fn()
+  } finally {
+    if (savedHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = savedHome
+    fs.rmSync(home, { recursive: true, force: true })
+  }
+}
+
+test('action=diagnostics returns the three shared logs scoped to one instance', async () => {
+  const r = await withDiagnosticLogs({
+    'dshim-crash.log': [
+      '[2026-01-02T03:04:05.000Z] uncaughtException pid=41 port=3080',
+      'Error: boom',
+      '    at tick (/tmp/a.js:1:1)',
+      '[2026-01-02T03:05:05.000Z] uncaughtException pid=42 port=3080',
+      'Error: neighbour',
+      ''
+    ].join('\n'),
+    'dshim-selfexit.log': '[2026-01-02T03:04:06.000Z] self-exit trigger=stop-self pid=41 port=3080\n',
+    'dshim-requests.log': '[2026-01-02T03:04:08.000Z] action=stop instance=3080 target=3081 via=local-browser peer=127.0.0.1 ua=browser\n'
+  }, () => callApi('action=diagnostics&port=3080&pid=41'))
+  assert.equal(r.status, 200)
+  assert.equal(r.json.ok, true)
+  assert.equal(r.json.port, 3080)
+  assert.equal(r.json.pid, 41)
+  // 崩溃：头与栈一起出现，同机另一实例的记录不得混入。
+  assert.deepEqual(r.json.crash.lines, [
+    '[2026-01-02T03:04:05.000Z] uncaughtException pid=41 port=3080',
+    'Error: boom',
+    '    at tick (/tmp/a.js:1:1)'
+  ])
+  assert.equal(r.json.selfExit.lines.length, 1)
+  assert.match(r.json.selfExit.lines[0], /pid=41/)
+  // 写操作追踪按实例端口归属：这一行确实含有对端地址与 User-Agent。
+  assert.equal(r.json.requests.lines.length, 1)
+  assert.match(r.json.requests.lines[0], /peer=127\.0\.0\.1/)
+})
+
+test('action=diagnostics reports a missing log file instead of failing', async () => {
+  const r = await withDiagnosticLogs({}, () => callApi('action=diagnostics&port=3080&pid=41'))
+  assert.equal(r.status, 200)
+  assert.equal(r.json.ok, true)
+  for (const key of ['crash', 'selfExit', 'requests']) {
+    assert.deepEqual(r.json[key], { exists: false, truncated: false, lines: [] }, key)
+  }
+})
+
+test('action=diagnostics refuses a port that is not an integer in range', async () => {
+  // 端口在这里同样会拼进文件名，因此穿越字符串必须在这里就失败。
+  for (const bad of [TRAVERSAL, '80.5', '1e3', '0', '65536', 'abc', '']) {
+    const r = await callApi('action=diagnostics&port=' + encodeURIComponent(bad))
+    assert.equal(r.status, 400, 'port=' + bad)
+    assert.equal(r.json.code, 'no_port')
+  }
+})
+
+// 诊断面回答的是"本机实例为什么消失了"，而写操作追踪每行含对端地址与请求携带的
+// User-Agent。它因此不走 fleet：有效的 bearer 也不能打开它，非回环 Host 与可信
+// 局域网浏览器的签名 cookie 同样不行。
+test('action=diagnostics refuses every remote caller, bearer included', async () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'dshim-diagremote-'))
+  const savedHome = process.env.DSH_HOME
+  const savedToken = process.env.DSHIM_FLEET_TOKEN
+  process.env.DSH_HOME = home
+  process.env.DSHIM_FLEET_TOKEN = 'test-fleet-token'
+  try {
+    const bearer = await callApiFull({
+      query: 'action=diagnostics&port=3080&pid=41',
+      remoteAddress: '203.0.113.5',
+      headers: { host: '127.0.0.1:3080', authorization: 'Bearer test-fleet-token' }
+    })
+    assert.equal(bearer.status, 403, '持有有效 fleet bearer 的对端仍然读不到诊断面')
+    assert.equal(bearer.json.code, 'loopback_only')
+
+    const lan = await callApiFull({
+      query: 'action=diagnostics&port=3080&pid=41',
+      host: 'lab.internal:3080',
+      remoteAddress: '192.0.2.50',
+      connection: { requestRejection: () => undefined }
+    })
+    assert.equal(lan.status, 403, 'trusted-LAN 浏览器的 Connection cookie 也不打开诊断面')
+    assert.equal(lan.json.code, 'loopback_only')
+  } finally {
+    if (savedHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = savedHome
+    if (savedToken === undefined) delete process.env.DSHIM_FLEET_TOKEN
+    else process.env.DSHIM_FLEET_TOKEN = savedToken
+    fs.rmSync(home, { recursive: true, force: true })
+  }
+})
+
+// 本地回环上的诊断面必须能应答，且不要求 bearer。
+test('action=diagnostics answers a loopback peer without a token', async () => {
+  const r = await withDiagnosticLogs({}, () => callApi('action=diagnostics&port=3080'))
+  assert.equal(r.status, 200)
+  assert.equal(r.json.ok, true)
+  assert.equal(r.json.pid, null, '没有 pid 就返回整份共享文件，而不是猜测归属')
+})
+
+// 诊断面同样拒绝跨站 Origin——它走的是严格回环守卫，不接受 fleetGuard 的宽松判定。
+test('action=diagnostics is refused a cross-site request', async () => {
+  const r = await callApiFull({
+    query: 'action=diagnostics&port=3080',
+    remoteAddress: '127.0.0.1',
+    headers: { origin: 'http://evil.example' }
+  })
+  assert.equal(r.status, 403)
+  assert.equal(r.json.code, 'bad_origin')
+})
+
 // 客户端会把缺失的 `peer` 字符串化成字面量 "undefined"，它到达宿主时是一个格式合法的
 // peer id，会让每一次本机读取都走（总是失败的）对端路径——本机日志会一直停在“加载
 // 中”。哨兵值表示“没有对端”，这些客户端因此仍读本机。

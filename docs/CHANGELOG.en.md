@@ -5,6 +5,10 @@ For Chinese, see [CHANGELOG.md](CHANGELOG.md).
 
 ## Unreleased
 
+### Added
+
+- The instance drawer gains a Diagnostics tab that lists that instance's crash black box, self-exit log and mutation trace, scoped by pid and instance port; all three files previously had a write path only. The surface accepts local loopback requests only, is never forwarded over fleet, and remote rows do not carry it.
+
 ### Fixed
 
 - The drawer's memory-trend header uses the class name the stylesheet declares, so the value aligns right.

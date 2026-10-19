@@ -339,3 +339,78 @@ test('the stop button arms in a warning state and only stops on the second click
   await panel.flush()
   assert.equal(calls.filter((c) => /action=stop/.test(c.url)).length, 1, 'the second click performs the stop')
 })
+
+// 诊断面是抽屉里的第三个标签。它读的是本机共享文件，因此必须带上该实例的 pid——
+// 崩溃记录用它区分本机的多个实例，而 pid 只有实例列表里有。
+const DIAGNOSTICS_REPLY = {
+  ok: true,
+  port: 3080,
+  pid: 1,
+  crash: { exists: true, truncated: false, lines: ['[t] uncaughtException pid=1 port=3080', 'Error: boom'] },
+  selfExit: { exists: true, truncated: false, lines: ['[t] self-exit trigger=stop-self pid=1 port=3080'] },
+  requests: { exists: true, truncated: false, lines: ['[t] action=stop instance=3080 peer=127.0.0.1 ua=browser'] }
+}
+
+const panelWithDiagnostics = () => {
+  const calls = []
+  const panel = mountPanel({
+    fetchImpl: async (url, init) => {
+      calls.push({ url: String(url), method: (init && init.method) || 'GET' })
+      const query = String(url).split('?')[1] || ''
+      if (/action=diagnostics/.test(query)) return { json: async () => DIAGNOSTICS_REPLY }
+      if (/action=list/.test(query)) return { json: async () => LIST_ONE }
+      return { json: async () => ({ ok: true }) }
+    }
+  })
+  return { panel, calls }
+}
+
+test('the diagnostics tab asks the host for that instance and shows what the request log records', async () => {
+  const { panel, calls } = panelWithDiagnostics()
+  await panel.flush()
+
+  // 先展开该行。
+  const row = findAll(panel.renderTree(), (n) => n.type === 'div' && /dshim-row/.test(n.props.className))[0]
+  assert.ok(row, 'the panel must render an instance row')
+  row.props.onClick()
+  await panel.flush()
+
+  const diagTab = buttonByText(panel.renderTree(), /Diagnostics/)
+  assert.ok(diagTab, 'the drawer must offer a diagnostics tab')
+  diagTab.props.onClick()
+  await panel.flush()
+
+  const diagCalls = calls.filter((c) => /action=diagnostics/.test(c.url))
+  assert.equal(diagCalls.length, 1, '点击标签只读取一次诊断面')
+  assert.match(diagCalls[0].url, /port=3080/, '请求必须带上该行的端口')
+  assert.match(diagCalls[0].url, /pid=1/, '崩溃记录按 pid 归属，因此 pid 必须一起发出')
+  assert.doesNotMatch(diagCalls[0].url, /peer=/, '诊断面不走 fleet，因此不得发 peer')
+
+  const text = textOf(panel.renderTree())
+  assert.match(text, /uncaughtException pid=1/, '崩溃记录出现在抽屉里')
+  // 写操作追踪含有对端地址与 User-Agent，读者必须先看到这份说明。
+  assert.match(text, /peer address/)
+  assert.match(text, /peer=127\.0\.0\.1/)
+})
+
+test('a remote row offers no diagnostics tab, since the files are local', async () => {
+  const remote = {
+    ok: true,
+    selfVersion: '0.9.10',
+    items: [{ port: 3080, managed: true, current: false, ui: true, remote: true, source: 'lab', pid: 9, rowKey: 'lab:3080' }]
+  }
+  const panel = mountPanel({
+    fetchImpl: async (url) => {
+      const query = String(url).split('?')[1] || ''
+      return { json: async () => (/action=list/.test(query) ? remote : { ok: true }) }
+    }
+  })
+  await panel.flush()
+  const row = findAll(panel.renderTree(), (n) => n.type === 'div' && /dshim-row/.test(n.props.className))[0]
+  row.props.onClick()
+  await panel.flush()
+  const tabs = findAll(panel.renderTree(), (n) => n.type === 'button')
+  const labels = tabs.map(textOf)
+  assert.ok(labels.includes('stdout') && labels.includes('stderr'))
+  assert.equal(labels.includes('Diagnostics'), false, '远端行挂上它只会读到本机同号端口的记录')
+})

@@ -21,7 +21,7 @@ DSH Web 的实例管理器。它为本机可见的每个 dsh web 实例显示一
 - 启动新实例：端口留空时取起始端口段内第一个空闲端口；指定端口已被占用时报错，不改用其他端口。
 - 打开实例：点击某行的 `:端口` 进入该实例界面；启动 token 由宿主即时换取，不进入面板状态与链接。
 - 停止实例：单个、当前或全部本地实例；远程行只读，也不参与 stop-all。
-- 每个实例的只读视图：stdout/stderr 日志、会话概要，以及该实例正在运行的内容。
+- 每个实例的只读视图：stdout/stderr 日志、会话概要，该实例正在运行的内容，以及诊断记录（崩溃黑匣子、自退出记录、写操作追踪）。
 - 远程实例：配置 peer 后可查看远程实例及其日志与会话。
 - Agent 工具：`instance_list`、`instance_start`、`instance_stop`、`instance_logs`、`instance_sessions`。
 - web 面板中的启动会向浏览器交接一次性 token URL 以换取浏览器 cookie，Agent 工具启动与桌面端启动都保持后台无窗口（启动参数带 `--no-open`）。
@@ -131,6 +131,19 @@ $env:DSHIM_FLEET_TOKEN_REF = 'DSHIM_FLEET_TOKEN'       # 存放 token 的环境�
 - 内部实例确认与转发只走严格 loopback 探测，SSE 仅向本机开放。
 - 每个被接受的写操作在 `<home>/launcher/logs/dshim-requests.log` 记录一行：对端地址、准入路径、请求携带的 `Host`/`Origin`/`Referer`/`User-Agent`、目标端口与结果。
 - `dshim-selfexit.log` 只记录触发者；Cookie 与 Authorization 既不读取也不写入。
+
+## 诊断记录
+
+实例静默消失时，面板抽屉的「诊断」标签给出该实例的三份记录，每份都是最近 200 行：
+
+- 崩溃黑匣子 `dshim-crash.log`：进程崩溃或未处理的 Promise 拒绝时写下一行头加异常栈。
+- 自退出记录 `dshim-selfexit.log`：每次以本进程退出收尾的路由写一行，说明是崩溃还是被要求离开。
+- 写操作追踪 `dshim-requests.log`：每个被接受的写操作一行，含对端地址、准入路径、`Host`/`Origin`/`Referer`/`User-Agent`、目标端口与结果。
+
+- 三份文件由本机所有实例共用，因此崩溃与自退出按该实例的 pid 筛选，写操作按实例端口筛选。
+- 诊断面只接受本机回环请求，且不做 fleet 转发：持有有效 fleet bearer 的对端与受信局域网浏览器都读不到它。远端行因此没有这个标签。
+- 崩溃记录的筛选保留整条记录（头与异常栈），因此栈不会落到另一个实例名下。
+- 这三份文件从未被读取也从未被清理；诊断面只读，不删除、不改写。
 
 ## 开发
 

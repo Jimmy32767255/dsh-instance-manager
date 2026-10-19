@@ -25,6 +25,9 @@ import {
   isValidRegistryEntry,
   normalizePort,
   tailFile,
+  selectCrashRecords,
+  selectSelfExitLines,
+  selectRequestLines,
   unionPorts,
   summarizeSessions,
   orderInstances,
@@ -532,6 +535,58 @@ test('summarizeSessions caps at N newest rows', () => {
   const rows = summarizeSessions(many, 20)
   assert.equal(rows.length, 20)
   assert.equal(rows[0].id, 's29', 'cap keeps the NEWEST rows')
+})
+
+// ---- 诊断记录的实例归属 --------------------------------------------------
+//
+// 三份诊断文件由本机所有实例共用，筛选必须在共享的行里挑出属于某个实例的那些。
+// 崩溃记录最容易错：异常栈跨多行，只按头筛选会让栈泄漏到别的实例名下，或者整条
+// 记录被丢掉——那正是"实例为什么消失了"唯一的证据。
+
+test('crash records keep their whole stack when filtered by pid', () => {
+  const lines = [
+    '[2026-01-02T03:04:05.000Z] uncaughtException pid=41 port=3080',
+    'Error: boom',
+    '    at tick (/tmp/a.js:1:1)',
+    '[2026-01-02T03:05:05.000Z] unhandledRejection pid=42 port=3081',
+    'Error: other',
+    '    at tick (/tmp/b.js:2:2)',
+    '    at again (/tmp/b.js:3:3)'
+  ]
+  assert.deepEqual(selectCrashRecords(lines, 41), lines.slice(0, 3),
+    '头与栈必须一起保留，另一实例的记录不得混入')
+  assert.deepEqual(selectCrashRecords(lines, 42), lines.slice(3),
+    '第二个实例拿到的是自己的头加两行栈')
+  assert.deepEqual(selectCrashRecords(lines, 99), [],
+    '没有记录的实例返回空，而不是别人的记录')
+})
+
+test('crash and self-exit lines fall back to the whole file without a valid pid', () => {
+  const crash = ['[2026-01-02T03:04:05.000Z] uncaughtException pid=41 port=3080', 'Error: boom']
+  const exits = ['[2026-01-02T03:04:06.000Z] self-exit trigger=stop-self pid=41 port=3080']
+  for (const pid of [null, undefined, 0, -1, 1.5, '41']) {
+    assert.deepEqual(selectCrashRecords(crash, pid), crash, 'pid=' + pid)
+    assert.deepEqual(selectSelfExitLines(exits, pid), exits, 'pid=' + pid)
+  }
+  assert.deepEqual(selectCrashRecords(undefined, 41), [])
+})
+
+test('self-exit and request lines filter by whole token, never by prefix', () => {
+  const exits = [
+    '[2026-01-02T03:04:06.000Z] self-exit trigger=stop-self pid=4 port=3080',
+    '[2026-01-02T03:04:07.000Z] self-exit trigger=stop-self pid=41 port=3081'
+  ]
+  assert.deepEqual(selectSelfExitLines(exits, 4), [exits[0]], 'pid=4 不能匹配 pid=41')
+  assert.deepEqual(selectSelfExitLines(exits, 41), [exits[1]])
+  // 端口在写操作追踪里以 `instance=` 出现，同一个前缀问题因此同样成立。
+  const reqs = [
+    '[2026-01-02T03:04:08.000Z] action=stop instance=3080 target=3081 via=local-browser',
+    '[2026-01-02T03:04:09.000Z] action=stop instance=3081 target=3080 via=local-browser'
+  ]
+  assert.deepEqual(selectRequestLines(reqs, 3080), [reqs[0]])
+  assert.deepEqual(selectRequestLines(reqs, 3081), [reqs[1]])
+  assert.deepEqual(selectRequestLines(reqs, null), reqs, '没有选出实例时整份文件就是全部')
+  assert.deepEqual(selectRequestLines(undefined, 3080), [])
 })
 
 // ---- fleet 上线/下线差异 --------------------------------------------------

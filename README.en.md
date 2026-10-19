@@ -21,7 +21,7 @@ The entry point is the menu icon at the bottom-left of the work area, right of t
 - Start a new instance: an empty port takes the first free port of the start range, and a named port already in use is reported instead of moving to another port.
 - Open an instance: a row's `:port` navigates to that instance's UI, and the launch token is read by the host at that moment, so it enters neither the panel state nor the link.
 - Stop one, the current, or all local instances; remote rows are read-only and never part of stop-all.
-- Read-only views per instance: stdout/stderr logs, session summaries, and what the instance is serving.
+- Read-only views per instance: stdout/stderr logs, session summaries, what the instance is serving, and its diagnostic records (crash black box, self-exit log, mutation trace).
 - Remote instances: with a peer configured, view remote instances, their logs, and their sessions.
 - Agent tools: `instance_list`, `instance_start`, `instance_stop`, `instance_logs`, `instance_sessions`.
 - A start from the web panel hands the one-time token URL off to a browser so the new instance can issue its browser cookie; an agent-tool start and a start from the desktop stay headless (`--no-open` is passed on).
@@ -131,6 +131,19 @@ The heartbeat file `<home>/run/instances/<port>.json` records this plugin's inst
 - Instance confirmation and forwarding use strict loopback probe actions only, and SSE is local-only.
 - Every accepted mutation writes one line to `<home>/launcher/logs/dshim-requests.log`, recording the peer address, the admission path, the request's `Host`/`Origin`/`Referer`/`User-Agent`, the target port, and the result.
 - `dshim-selfexit.log` records only the trigger; cookies and Authorization are never read and never written.
+
+## Diagnostic records
+
+When an instance disappears silently, the drawer's Diagnostics tab lists that instance's three records, the last 200 lines of each:
+
+- Crash black box `dshim-crash.log`: one header line plus the stack, written on a process crash or an unhandled promise rejection.
+- Self-exit log `dshim-selfexit.log`: one line per route that ends this process, saying whether it crashed or was asked to leave.
+- Mutation trace `dshim-requests.log`: one line per accepted mutation, with the peer address, the admission path, `Host`/`Origin`/`Referer`/`User-Agent`, the target port, and the result.
+
+- All three files are shared by every local instance, so crash and self-exit records are scoped by that instance's pid and the mutation trace by its port.
+- The diagnostics surface accepts local loopback requests only and is never forwarded over fleet: neither a peer holding a valid fleet bearer nor a trusted LAN browser can read it. Remote rows therefore carry no such tab.
+- Filtering a crash record keeps the whole record — header and stack — so a stack never lands under another instance's name.
+- These files are never pruned by anything, and the diagnostics surface only reads them: nothing deletes or rewrites them.
 
 ## Development
 
