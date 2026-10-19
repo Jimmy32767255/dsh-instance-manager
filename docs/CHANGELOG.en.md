@@ -10,6 +10,10 @@ For Chinese, see [CHANGELOG.md](CHANGELOG.md).
 - The drawer's memory-trend header uses the class name the stylesheet declares, so the value aligns right.
 - When the auto-port retry also fails, the error message carries the reason from both attempts.
 
+### Maintenance
+
+- Compatibility verification covers `0.2.1-rc.2`: that release adds TLS to the webserver, adds the `/connect` route and API cookies to the Connection carrier, and reads `engines.dsh` before peerDependencies in the plugin preflight; none of the surfaces this plugin reads changed.
+
 ## 0.11.0 - 2026-09-30
 
 ### Fixed
