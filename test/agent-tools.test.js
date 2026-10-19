@@ -1,15 +1,13 @@
-// Unit tests for the agent tool definitions in lib/agent-tools.js.
+// lib/agent-tools.js 中 agent 工具定义的单元测试。
 //
-// The tools are built through an injected `defineTool` so these tests run on
-// the stock node:test runner with NO @deepseek-ai/dsh-tools installed: the
-// identity pass-through below keeps the raw definition objects inspectable,
-// and fake api closures stand in for the host half's operations.
+// 工具通过注入的 `defineTool` 构造，因此这些测试在未安装 @deepseek-ai/dsh-tools 的
+// node:test 上也能运行：下面的恒等透传保留原始定义对象供检查，假的 api 闭包代替宿主侧
+// 操作。
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { buildAgentTools } from '../lib/agent-tools.js'
 
-// Identity defineTool — production passes dsh's validating factory, which
-// must accept the same shape these assertions pin down.
+// 恒等 defineTool——生产环境传入 dsh 的校验工厂，它必须接受这些断言固定的同一形状。
 const identity = (d) => d
 
 const makeApi = (over = {}) => {
@@ -51,7 +49,7 @@ test('buildAgentTools exposes the five instance tools with registry-ready shapes
   for (const def of Object.values(tools)) {
     assert.equal(typeof def.description, 'string')
     assert.equal(typeof def.execute, 'function')
-    // Output contract: object root, closed, with a render projection.
+    // 输出契约：对象根、封闭，并带 render 投影。
     assert.equal(def.output.schema.type, 'object')
     assert.equal(def.output.schema.additionalProperties, false)
     assert.equal(typeof def.output.render, 'function')
@@ -66,7 +64,7 @@ test('instance_list maps rows, prunes absent fields, and renders a table', async
     port: 3080, managed: true, current: true, url: 'http://127.0.0.1:3080/',
     pid: 111, version: '0.7.0', sessions: 2, rss: 9, startedAt: 5
   })
-  // Unmanaged row: null pid pruned (schema has no nullable nodes).
+  // 未托管行：null pid 被删除（schema 没有可空节点）。
   assert.deepEqual(v.instances[1], { port: 4000, managed: false, current: false, url: 'http://127.0.0.1:4000/' })
   assert.equal(v.currentPort, 3080)
 
@@ -112,10 +110,9 @@ test('instance_stop forwards foreign ports and validates its argument', async ()
 })
 
 test("instance_stop surfaces the host's desktop refusal unchanged", async () => {
-  // The host owns the desktop decision (a port number says nothing about what is
-  // behind it) and this tool runs on a stock node:test runner, so the refusal
-  // arrives as an api result. It must pass both the code and the reason through
-  // verbatim — an agent reads the rendered text, not a status code.
+  // 桌面端判定属于宿主（端口号说明不了它背后是什么），而本工具运行在普通 node:test
+  // 上，因此拒绝以 api 结果的形式到达。code 与原因必须原样透传——agent 读的是渲染后
+  // 的文本，不是状态码。
   const refusal = {
     ok: false,
     code: 'stop_desktop_refused',
@@ -126,14 +123,13 @@ test("instance_stop surfaces the host's desktop refusal unchanged", async () => 
   const r = await stopDef.execute({ port: 19387 })
   assert.deepEqual(r, refusal)
   assert.deepEqual(calls.stop, [19387])
-  // The rendered line prefers `error` over `code`, so the reason a human sees is
-  // the host's own wording, not a bare code.
+  // 渲染行优先使用 `error` 而不是 `code`，因此人看到的是宿主自己的措辞，而不是一个
+  // 光秃秃的 code。
   assert.match(stopDef.output.render({ port: 19387 }, r)[0].text, /desktop host/)
 })
 
 test('instance_logs rejects a non-port before it can be forwarded to a peer', async () => {
-  // The host validates too, but the port can leave this machine over the
-  // fleet link, and it is interpolated into a filename on the far side.
+  // 宿主也会校验，但这个端口可以经由 fleet 链路离开本机，并会在对端拼进文件名。
   const { api, calls } = makeApi()
   const logDef = byName(buildAgentTools(identity, api)).instance_logs
   for (const bad of [0, -1, 70000, 1.5, '3080', '../'.repeat(8) + 'Windows/win.ini']) {
@@ -183,10 +179,10 @@ test('instance_sessions forwards to the api and renders a compact list', async (
 
   const text0 = def.output.render({}, v)[0].text
   assert.match(text0, /:3080 — 2 live session/)
-  assert.match(text0, /abcdef12 · alpha · 12 ev/, 'short id + cwd basename + event count')
+  assert.match(text0, /abcdef12 · alpha · 12 ev/, '短 id + 工作目录基本名 + 事件数')
   assert.match(text0, /subagent/)
 
-  // >8 rows collapse into a "+N more" tail.
+  // 超过 8 行折叠成 “+N more” 尾巴。
   const many = Object.assign({}, v, {
     total: 10,
     sessions: Array.from({ length: 10 }, (_, i) => ({ id: 'id' + i, createdAt: i }))
@@ -210,10 +206,9 @@ test('instance_sessions surfaces unavailability and rejects bad ports', async ()
   assert.deepEqual(calls.sessions, [4000], 'only the valid port reaches the api')
 })
 
-// Review finding: the reply may come from another instance, whose older or
-// newer route vocabulary is not this tool's output schema. An extra field
-// fails `additionalProperties: false` in the tools service, and render()
-// indexes `sessions` on the success path, so an absent one throws there.
+// 应答可能来自另一个实例，其新旧路由字段超出本工具的输出 schema。多余字段在
+// tools 服务里会因 `additionalProperties: false` 失败，而 render() 在成功路径上
+// 直接索引 `sessions`，缺失时在那里抛出。
 test('instance_sessions projects a foreign reply onto the declared keys', async () => {
   const declaration = byName(buildAgentTools(identity, makeApi().api)).instance_sessions
   const declared = Object.keys(declaration.output.schema.properties).sort()
@@ -224,8 +219,7 @@ test('instance_sessions projects a foreign reply onto the declared keys', async 
       port: 3080,
       total: 1,
       sessions: [{ id: 'a', createdAt: 1 }],
-      // Fields this tool never declared: an older panel route answered them,
-      // and a newer one may add more.
+      // 本工具从未声明的字段：旧版面板路由会返回它们，新版还可能增加更多。
       currentPort: 3080,
       selfVersion: '0.7.0',
       cursor: null
@@ -246,8 +240,8 @@ test('instance_sessions survives a reply with no sessions array', async () => {
   const v = await def.execute({ port: 3080 })
   assert.equal(v.ok, true)
   assert.deepEqual(v.sessions, [])
-  assert.equal(v.total, 0, 'the fallback counts what it actually returns')
-  // render() indexed `v.sessions.length` and threw here before the projection.
+  assert.equal(v.total, 0, '回退值按实际返回的行计数')
+  // 投影之前，render() 在这里索引 `v.sessions.length` 并抛出。
   assert.match(def.output.render({}, v)[0].text, /no active sessions/)
 })
 
@@ -275,6 +269,6 @@ test('instance_sessions reports a failure reply as not-ok without inventing rows
   const def = byName(buildAgentTools(identity, api)).instance_sessions
 
   const v = await def.execute({ port: 4000 })
-  assert.equal(v.ok, false, 'a falsy-but-not-boolean reply must still read as false')
+  assert.equal(v.ok, false, '非布尔但为假值的应答也必须读成 false')
   assert.match(def.output.render({}, v)[0].text, /failed/)
 })

@@ -1,10 +1,8 @@
-// DIM-M1 settings seam tests.
+// 设置接缝测试。
 //
-// The schemastery `z` is a minimal stand-in that records declared fields and
-// roles: nothing here resolves values THROUGH the schema — the register
-// helpers normalize sections via resolve*Section — so the stub only has to be
-// faithful about the shape DIM declares (field names, role('secret'),
-// applies, base layer).
+// schemastery 的 `z` 是最小替身，只记录声明的字段与角色：这里没有通过 schema 解析
+// 值——注册辅助函数用 resolve*Section 归一化分节——因此替身只需忠实于本插件声明的
+// 形状（字段名、role('secret')、applies、base 层）。
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import {
@@ -47,8 +45,7 @@ const mockSettingsHost = ({ fail = false, sections = {} } = {}) => {
     settings: {
       register(ns, schema, options) {
         calls.push({ ns, schema, options })
-        // Mirrors the documented registration-time trap: a stored section
-        // that already fails the schema rejects the registration itself.
+        // 与文档描述的注册期行为一致：已不符合 schema 的存储分节会让注册本身失败。
         if (fail) throw new TypeError('stored section fails the schema')
         return {
           get: () => sections[ns],
@@ -80,10 +77,10 @@ test('live namespace registers dock/interval/token/peers with the env base layer
   const fields = call.schema.fields
   assert.equal(fields[REFRESH_INTERVAL_FIELD].kind, 'number')
   assert.equal(fields[FLEET_TOKEN_FIELD].roleName, 'secret',
-    'the token must be declared write-only so every wire read redacts it')
+    'token 必须声明为只写，所有线路读取都会脱敏')
   assert.equal(fields[PEERS_FIELD].kind, 'string')
-  // The owner read folds base into a normalized section even with no stored
-  // user section (scope.get() answers undefined here).
+  // 即使没有存储的用户分节（这里 scope.get() 返回 undefined），所有者的读取也会把
+  // base 合并进归一化分节。
   assert.equal(r.get()[FLEET_TOKEN_FIELD], 'secret-token')
   assert.equal(r.get()[PEERS_FIELD], 'a@http://10.0.0.1:3080,b@10.0.0.2:3080')
 })
@@ -125,9 +122,9 @@ test('a corrupt stored section degrades to env/defaults and never blocks load', 
   assert.equal(startup.registered, false)
   assert.equal(startup.degraded, true)
   assert.deepEqual(startup.get(), { [PORT_RANGE_FIELD]: '4100-4109' })
-  assert.equal(warned.length, 2, 'both degradations warn once each')
+  assert.equal(warned.length, 2, '两次降级各警告一次')
 
-  // With no env at all, degradation lands on pure schema defaults.
+  // 完全没有环境变量时，降级落在纯 schema 默认值上。
   const bare = registerLiveSettings({ ctx: mockSettingsHost({ fail: true }).ctx, z, env: {} })
   assert.equal(bare.get()[FLEET_TOKEN_FIELD], undefined)
   assert.equal(bare.get()[PEERS_FIELD], '')
@@ -163,11 +160,10 @@ test('the fleet token survives only under its schema-declared secret field', () 
   assert.equal(buildLiveSchema(z).fields[FLEET_TOKEN_FIELD].roleName, 'secret')
   const section = resolveLiveSection(undefined, env)
   assert.equal(section[FLEET_TOKEN_FIELD], 'tok')
-  // The token must never ride along in the peers descriptors the fleet code
-  // consumes and the panel renders.
+  // token 绝不能混进 fleet 代码使用、面板渲染的 peers 描述中。
   assert.equal(JSON.stringify(parsePeers(section[PEERS_FIELD])).includes('tok'), false)
   assert.equal(JSON.stringify(buildLiveBase(env)).indexOf('"' + FLEET_TOKEN_FIELD + '":"tok"') > -1, true,
-    'the env token enters ONLY through the declared secret base field')
+    '环境变量中的 token 只通过声明的 secret base 字段进入')
 })
 
 test('missing schemastery or settings service degrades without throwing', () => {
@@ -175,7 +171,7 @@ test('missing schemastery or settings service degrades without throwing', () => 
   assert.equal(registerStartupSettings({ ctx: {}, z: null }).registered, false)
   assert.equal(registerLiveSettings({ z }).registered, false)
   assert.equal(registerStartupSettings({ z }).registered, false)
-  // Degraded getters still answer usable sections.
+  // 降级后的取值函数仍返回可用的分节。
   assert.equal(registerLiveSettings({ ctx: {}, z: null }).get()[REFRESH_INTERVAL_FIELD], 4000)
 })
 
@@ -186,13 +182,11 @@ test('port spec resolution: user over env over default; garbage falls back at co
   assert.deepEqual(resolveStartupSection({}, { DSHIM_PORT_RANGE: '4300-4309' }),
     { [PORT_RANGE_FIELD]: '4300-4309' })
   assert.deepEqual(resolveStartupSection(undefined, {}), { [PORT_RANGE_FIELD]: '3080-3129,19387' })
-  // Garbage survives in the section (the schema is a plain string) but
-  // parsePortSpec falls back exactly like the old env-only path.
+  // 垃圾值会留在分节中（schema 只是普通字符串），但 parsePortSpec 会回退到默认值。
   const garbage = resolveStartupSection({ [PORT_RANGE_FIELD]: 'nonsense' }, {})
   assert.deepEqual(parsePortSpec(garbage[PORT_RANGE_FIELD]), { min: 3080, max: 3129, extra: [19387] })
-  // A list value is carried through the env base layer unchanged.
+  // 列表值原样经由环境变量 base 层传递。
   assert.deepEqual(buildStartupBase({ DSHIM_PORT_RANGE: '3080-3129,19387' }), { [PORT_RANGE_FIELD]: '3080-3129,19387' })
-  // Garbage env is never carried into the base layer (a garbage base would
-  // fail the whole section at registration).
+  // 垃圾环境变量绝不进入 base 层（垃圾 base 会让整个分节在注册时校验失败）。
   assert.deepEqual(buildStartupBase({ DSHIM_PORT_RANGE: 'junk' }), {})
 })

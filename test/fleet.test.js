@@ -1,4 +1,4 @@
-// Unit tests for the fleet peer-link helpers in lib/fleet.js (F2).
+// lib/fleet.js 中对端链路辅助函数的单元测试。
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { parsePeers, LINK_PATH, createQueryResponder, FleetLinks, QUERY_LIMIT } from '../lib/fleet.js'
@@ -19,11 +19,10 @@ test('parsePeers keeps https origins on wss and tolerates bare hosts', () => {
 })
 
 test('parsePeers rejects origins carrying userinfo', () => {
-  // A peer authenticates with the fleet bearer token; credentials in the URL
-  // would travel in the wsUrl and surface in error details.
+  // 对端用 fleet bearer 认证；URL 里的凭证会进入 wsUrl，也会出现在错误详情中。
   assert.deepEqual(parsePeers('a@http://user:pass@192.168.1.20:3080'), [])
   assert.deepEqual(parsePeers('a@user:pass@host:3080'), [])
-  // A path segment containing '@' is not userinfo.
+  // 路径段里的 '@' 不是 userinfo。
   assert.equal(parsePeers('a@http://host:3080/p@th').length, 1)
 })
 
@@ -34,14 +33,13 @@ test('parsePeers drops junk, dedupes ids, strips trailing slashes, caps', () => 
   assert.equal(dup.length, 1)
   assert.equal(dup[0].origin, 'http://a')
   const many = parsePeers('p1@http://a,p2@http://b,p3@http://c', 2)
-  assert.equal(many.length, 2, 'cap bounds the peer table')
+  assert.equal(many.length, 2, '数量上限约束对端表')
 })
 
-// ---- inbound query answering (F3) ---------------------------------------
-// The responder delegates each kind to the same functions the local HTTP route
-// uses, so a peer reaches no code path the panel itself would refuse: `sessions`
-// forwards the requested port, and `logs` normalizes the stream before it names
-// a file. These tests pin that delegation.
+// ---- 入站查询应答 ---------------------------------------------------------
+// 应答器把每种查询委托给本地 HTTP 路由使用的同一组函数，对端因此无法到达面板自己
+// 会拒绝的代码路径：`sessions` 转发请求中的端口，`logs` 在命名文件前归一化流名称。
+// 这些测试固定委托关系。
 const makeResponder = (over = {}) => {
   const calls = []
   const deps = {
@@ -62,7 +60,7 @@ test('query responder answers ping (and a missing query) with identity', async (
   const { answer, calls } = makeResponder()
   assert.deepEqual(await answer({ kind: 'ping' }), { ok: true, fleetId: 'fleet-abc', version: '9.9.9' })
   assert.deepEqual(await answer(undefined), { ok: true, fleetId: 'fleet-abc', version: '9.9.9' })
-  assert.deepEqual(calls, [], 'ping must not touch any instance state')
+  assert.deepEqual(calls, [], 'ping 不得接触任何实例状态')
 })
 
 test('query responder answers fleet with local rows only', async () => {
@@ -70,28 +68,27 @@ test('query responder answers fleet with local rows only', async () => {
   const r = await answer({ kind: 'fleet' })
   assert.equal(r.ok, true)
   assert.equal(r.currentPort, 3080)
-  assert.deepEqual(r.items.map((i) => i.port), [3080], 'remote rows must never be echoed back to a peer')
+  assert.deepEqual(r.items.map((i) => i.port), [3080], '远端行绝不能回传给对端')
 })
 
 test('query responder forwards the REQUESTED port to sessions', async () => {
-  // Regression: a branch that answered from this instance's own data would
-  // return :3080's sessions for a request naming :3090 — wrong data rather
-  // than an error, which is the worst failure mode for a fleet view.
+  // 用本实例自己的数据应答会让请求 :3090 的查询返回 :3080 的会话——错误的数据而不是
+  // 错误，这对 fleet 视图是最糟的失败方式。
   const { answer, calls } = makeResponder()
   const r = await answer({ kind: 'sessions', port: 3090 })
-  assert.deepEqual(calls, [['sessions', 3090]], 'the requested port must survive the hop')
+  assert.deepEqual(calls, [['sessions', 3090]], '请求的端口必须穿过这一跳')
   assert.equal(r.port, 3090)
 })
 
 test('query responder treats an omitted sessions port as "yourself"', async () => {
   const { answer, calls } = makeResponder()
   await answer({ kind: 'sessions' })
-  assert.deepEqual(calls, [['sessions', undefined]], 'no port means the peer\'s own instance')
+  assert.deepEqual(calls, [['sessions', undefined]], '没有端口表示对端自己的实例')
 })
 
 test('query responder passes logs port and stream through untouched', async () => {
-  // The port lands in a filename on the answering side; validation lives in
-  // the shared logsFor/normalizePort pair, deliberately NOT duplicated here.
+  // 端口会在应答方拼进文件名；校验在共享的 logsFor/normalizePort 中，刻意不在这里
+  // 重复。
   const { answer, calls } = makeResponder()
   await answer({ kind: 'logs', port: 3090, stream: 'err' })
   await answer({ kind: 'logs', port: 3090 })
@@ -99,32 +96,28 @@ test('query responder passes logs port and stream through untouched', async () =
 })
 
 test('query responder passes a peer-supplied logs port straight to the validating helper', async () => {
-  // The responder deliberately does NOT validate: it forwards verbatim and
-  // lets logsFor/normalizePort — the same gate the HTTP route uses — decide.
-  // Duplicating the rule here would create a second, weaker copy.
+  // 应答器刻意不校验：原样转发，由 logsFor/normalizePort——HTTP 路由使用的同一道
+  // 关卡——决定。在这里复制规则会产生第二份更弱的副本。
   const attack = '../'.repeat(8) + 'Windows/win.ini'
   const { answer, calls } = makeResponder()
   await answer({ kind: 'logs', port: attack })
-  assert.equal(calls[0][1], attack, 'forwarded untouched')
-  assert.equal(normalizePort(calls[0][1]), null, 'and the shared validator rejects it before any filename is built')
+  assert.equal(calls[0][1], attack, '原样转发')
+  assert.equal(normalizePort(calls[0][1]), null, '共享校验器会在构造任何文件名之前拒绝它')
 })
 
 test('query responder reports unknown kinds instead of guessing', async () => {
   const { answer, calls } = makeResponder()
   assert.deepEqual(await answer({ kind: 'stop-everything' }), { ok: false, code: 'unknown_query' })
-  assert.deepEqual(calls, [], 'an unrecognized kind must not reach any instance state')
+  assert.deepEqual(calls, [], '未识别的种类不得接触任何实例状态')
 })
 
-// ---- mutual peering must not amplify (F2) -------------------------------
-// The natural fleet config is two machines that each list the other. Answering
-// a peer's `fleet` query by re-listing the WHOLE fleet — peers included — made
-// that pair answer each other forever: A asks B, B's answer asks A, A's answer
-// asks B... measured at 5000 nested listings in 70 ms, every one a full 50-port
-// sweep, on both machines, from a single panel refresh.
+// ---- 互相 peer 不得放大 ---------------------------------------------------
+// 常见的 fleet 配置是两台机器互相列出对方。用重新列出整个 fleet（包含对端）来应答
+// 对端的 `fleet` 查询，会让这一对永远互相应答：A 问 B，B 的应答去问 A，A 的应答又去
+// 问 B……一次面板刷新即可在两端产生大量嵌套列表，每一次都是全端口扫描。
 //
-// The host removes it at the source (the responder gets the peer-free
-// listLocalInstances). This test pins the transport-level guard that holds
-// even when the injected lister is NOT peer-free.
+// 宿主在源头消除它（应答器拿到的是不含对端的 listLocalInstances）。本测试固定传输层
+// 的守卫，它即使拿到并非不含对端的列表器也成立。
 const WS_OPEN = 1
 class MemSocket {
   constructor(url) { this.url = url; this.readyState = WS_OPEN; this.h = {}; this.remote = null; this.isAlive = true }
@@ -148,10 +141,9 @@ class MemWSS {
 const wireMutualPeers = async () => {
   const dials = []
   const waiting = []
-  // The two links are built from `deps` before anything is dialed, and a dial
-  // only happens after `resolveToken()` settles. Waiting for the sockets the
-  // injected constructor actually made is the honest condition — a fixed
-  // setTimeout just raced it, and lost on a loaded runner.
+  // 两条链路在拨号前由 `deps` 构造，拨号只在 `resolveToken()` 结算后发生。等待注入
+  // 的构造函数实际创建的 socket 才是诚实的条件——固定 setTimeout 会与其竞争，并在
+  // 负载高的机器上失败。
   const untilDialed = (count) => dials.length >= count
     ? Promise.resolve()
     : new Promise((resolve) => { waiting.push({ count, resolve }) })
@@ -175,8 +167,8 @@ const wireMutualPeers = async () => {
       safeTokenEqual: (x, y) => x === y,
       fleetId: () => 'fleet-' + name,
       resolveToken: async () => 'tok',
-      // Deliberately the WRONG shape for this test: answering a fleet query
-      // re-lists the whole fleet, peers included. The guard must survive it.
+      // 刻意使用对本测试错误的形状：应答 fleet 查询时重新列出整个 fleet，包含
+      // 对端。守卫必须在这种实现下仍然成立。
       answerQuery: createQueryResponder({
         fleetId: () => 'fleet-' + name,
         version: '0.9.1',
@@ -195,10 +187,10 @@ const wireMutualPeers = async () => {
   const A = build('a', 'b')
   const B = build('b', 'a')
   await untilDialed(2)
-  // A dials B and B dials A: hand each outbound socket to the other's inbound.
+  // A 拨向 B，B 拨向 A：把每条出站 socket 接到对方入站。
   const aSide = dials.find((d) => d.url === 'ws://b/link')
   const bSide = dials.find((d) => d.url === 'ws://a/link')
-  assert.ok(aSide && bSide, 'both peers must have dialed')
+  assert.ok(aSide && bSide, '两个对端都必须已经拨号')
   const bAccept = new MemSocket()
   const aAccept = new MemSocket()
   aSide.remote = bAccept; bAccept.remote = aSide; aSide.emit('open')
@@ -212,18 +204,17 @@ test('a mutually-peered pair answers one fleet query without amplification', asy
   const { A, B, counts } = await wireMutualPeers()
   try {
     const res = await A.hub.queryPeer('b', { kind: 'fleet' }, 1000)
-    assert.equal(res.ok, true, 'the peer must still answer: ' + JSON.stringify(res))
-    assert.equal(counts.b, 1, 'the answering side lists exactly once')
-    assert.equal(counts.a, 0, 'and must NOT be pulled into listing itself')
+    assert.equal(res.ok, true, '对端仍必须应答：' + JSON.stringify(res))
+    assert.equal(counts.b, 1, '应答方只列一次')
+    assert.equal(counts.a, 0, '且不能被拉进来自己也去列')
   } finally {
     A.hub.dispose(); B.hub.dispose()
   }
 })
 
-// ---- one link may not answer another link's question -------------------
-// A `query-result` settles only the query that left on its own socket: reqId is
-// a counter plus a timestamp, not a secret, so matching on that id alone would
-// let any socket that cleared the bearer settle somebody else's query.
+// ---- 一条链路不能应答另一条的问题 --------------------------------------
+// `query-result` 只结算从它自己 socket 发出的查询：reqId 是计数器加时间戳，不是
+// 秘密，只按该 id 匹配会让任何通过 bearer 的 socket 结算别人的查询。
 const buildHub = () => {
   const answered = []
   const hub = new FleetLinks({
@@ -251,8 +242,8 @@ test('a query-result settles its own socket\'s query only', async () => {
 
   other.emit('message', JSON.stringify({ type: 'query-result', reqId: 'q7-known', result: { ok: true, forged: true } }))
   await settleAfterOneTurn()
-  assert.deepEqual(settled, [], 'a different socket must not settle this query')
-  assert.equal(hub.pending.has('q7-known'), true, 'it stays pending so the real answer can still land')
+  assert.deepEqual(settled, [], '另一条 socket 不得结算这个查询')
+  assert.equal(hub.pending.has('q7-known'), true, '它保持待决，真正的应答仍可到达')
 
   asked.emit('message', JSON.stringify({ type: 'query-result', reqId: 'q7-known', result: { ok: true, real: true } }))
   await settleAfterOneTurn()
@@ -262,7 +253,7 @@ test('a query-result settles its own socket\'s query only', async () => {
 
 test('the upgrade server caps one frame at a documented byte count', () => {
   const { hub } = buildHub()
-  assert.ok(hub.server.options.maxPayload > 0, 'a peer must not be able to stream an unbounded frame body')
+  assert.ok(hub.server.options.maxPayload > 0, '对端不得流式发送无界的帧正文')
   hub.dispose()
 })
 
@@ -279,11 +270,11 @@ test('a peer that floods query frames is answered rate_limited, not left hanging
   }
   await settleAfterOneTurn()
 
-  assert.equal(answered.length, QUERY_LIMIT, 'the window admits exactly its budget')
+  assert.equal(answered.length, QUERY_LIMIT, '窗口恰好放行其额度')
   const limited = replies.filter((r) => r.result && r.result.code === 'rate_limited')
-  assert.equal(limited.length, 5, 'the excess is refused rather than silently dropped')
+  assert.equal(limited.length, 5, '超出部分被拒绝，而不是静默丢弃')
   for (const reply of limited) {
-    assert.equal(typeof reply.reqId, 'string', 'each refusal still carries the id that asked')
+    assert.equal(typeof reply.reqId, 'string', '每次拒绝仍带回发起查询的 id')
   }
   hub.dispose()
 })
@@ -291,17 +282,16 @@ test('a peer that floods query frames is answered rate_limited, not left hanging
 test('a fleet query nested inside an inbound fleet answer is refused, not forwarded', async () => {
   const { A, B, counts } = await wireMutualPeers()
   try {
-    // Drive the nested query directly: while B is answering A, B may not ask
-    // anyone. This is the invariant the amplification test above exercises
-    // end-to-end; here it is asserted on the returned code.
+    // 直接驱动嵌套查询：B 正在应答 A 时，B 不得再询问任何人。上面的放大测试端到端
+    // 验证的就是这个不变式；这里断言返回的 code。
     B.hub.answeringFleet += 1
     const nested = await B.hub.queryPeer('a', { kind: 'fleet' }, 300)
     B.hub.answeringFleet -= 1
     assert.deepEqual(nested, { ok: false, code: 'fleet_query_nested' })
-    assert.equal(counts.b, 0, 'a refused query must never reach the lister')
-    // Non-fleet kinds stay available (a nested sessions/log read is legal).
+    assert.equal(counts.b, 0, '被拒绝的查询绝不能到达列表器')
+    // 非 fleet 种类仍然可用（嵌套的会话/日志读取是允许的）。
     const other = await B.hub.queryPeer('a', { kind: 'sessions', port: 3080 }, 300)
-    assert.ok(other.ok !== undefined, 'only fleet queries are guarded')
+    assert.ok(other.ok !== undefined, '只有 fleet 查询受守卫限制')
   } finally {
     A.hub.dispose(); B.hub.dispose()
   }
