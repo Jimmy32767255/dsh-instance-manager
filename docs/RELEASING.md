@@ -29,14 +29,7 @@ The ci badge at the head of the README badge row is `compat.yml` on `main` — t
 
    A `check` only compares the marked blocks its pinned dock version knows, so a block newer than that pin passes silently. Raise the pin and re-sync every block in one commit: two pushes — old bytes under a new pin, or the reverse — leave CI reporting ok about a file it never actually verified.
 
-3. Run the repository's checks — the same commands as the Verify block in `AGENTS.md`:
-
-   ```sh
-   npm test
-   npm run docs:check
-   for f in lib/*.js; do node --check "$f"; done
-   npm pack --dry-run
-   ```
+3. Run the checks in the `Verify` section of `../AGENTS.md`.
 
 4. Commit and push the development branch:
 

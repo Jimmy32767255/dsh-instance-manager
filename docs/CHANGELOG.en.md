@@ -3,6 +3,26 @@
 Release notes are generated from the matching version section; newest first.
 For Chinese, see [CHANGELOG.md](CHANGELOG.md).
 
+## 0.12.0 - 2026-10-19
+
+### Added
+
+- An instance row gains a Restart button and there is a new `instance_restart` tool: both restart a local instance on the same port, with the port empty between the stop and the start, failing on a grab and never moving elsewhere. The current instance and the desktop host are never restarted.
+- The instance drawer gains a Diagnostics tab that lists that instance's crash black box, self-exit log and mutation trace, scoped by pid and instance port; all three files previously had a write path only. The surface accepts local loopback requests only, is never forwarded over fleet, and remote rows do not carry it.
+
+### Fixed
+
+- The drawer's memory-trend header uses the class name the stylesheet declares, so the value aligns right.
+- When the auto-port retry also fails, the error message carries the reason from both attempts.
+
+### Changed
+
+- A session summary row gains the folded title, agent preset, parent session and delegation depth: the title comes from the host's optional `sessionTitle` service and falls back to the 8-character short id when absent, while none of the four exist in an older instance's reply, so each is adopted by type and omitted when missing.
+
+### Maintenance
+
+- Compatibility verification covers `0.2.1-rc.2`: that release adds TLS to the webserver, adds the `/connect` route and API cookies to the Connection carrier, and reads `engines.dsh` before peerDependencies in the plugin preflight; none of the surfaces this plugin reads changed.
+
 ## 0.11.0 - 2026-09-30
 
 ### Fixed

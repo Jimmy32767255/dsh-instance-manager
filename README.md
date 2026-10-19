@@ -21,9 +21,10 @@ DSH Web 的实例管理器。它为本机可见的每个 dsh web 实例显示一
 - 启动新实例：端口留空时取起始端口段内第一个空闲端口；指定端口已被占用时报错，不改用其他端口。
 - 打开实例：点击某行的 `:端口` 进入该实例界面；启动 token 由宿主即时换取，不进入面板状态与链接。
 - 停止实例：单个、当前或全部本地实例；远程行只读，也不参与 stop-all。
-- 每个实例的只读视图：stdout/stderr 日志、会话概要，以及该实例正在运行的内容。
+- 原地重启：在**同一端口**重启某个本地实例，无需手动 stop + start 两步。
+- 每个实例的只读视图：stdout/stderr 日志、会话概要（时间、折叠标题或短 id、工作目录、子代理标记、预设、委派深度、事件数），该实例正在运行的内容，以及诊断记录（崩溃黑匣子、自退出记录、写操作追踪）。
 - 远程实例：配置 peer 后可查看远程实例及其日志与会话。
-- Agent 工具：`instance_list`、`instance_start`、`instance_stop`、`instance_logs`、`instance_sessions`。
+- Agent 工具：`instance_list`、`instance_start`、`instance_stop`、`instance_restart`、`instance_logs`、`instance_sessions`。
 - web 面板中的启动会向浏览器交接一次性 token URL 以换取浏览器 cookie，Agent 工具启动与桌面端启动都保持后台无窗口（启动参数带 `--no-open`）。
 
 ## 安装
@@ -82,7 +83,7 @@ dsh plugin --profile web add github:xswt442-cmd/dsh-instance-manager
 ```powershell
 $env:DSHIM_REFRESH_INTERVAL_MS = '4000'                # live.refreshIntervalMs，仅接受十进制整数
 $env:DSHIM_FLEET_TOKEN = '<long-random-secret>'        # live.fleetToken
-$env:DSHIM_PEERS = 'office@http://192.168.1.20:3080'   # live.peers，格式同上表
+$env:DSHIM_PEERS = 'office@http://192.0.2.10:3080'     # live.peers，格式同上表
 $env:DSHIM_PORT_RANGE = '3080-3129,19387'              # startup.portRange
 $env:DSHIM_FLEET_TOKEN_REF = 'DSHIM_FLEET_TOKEN'       # 存放 token 的环境变量名，见下节
 ```
@@ -113,7 +114,7 @@ $env:DSHIM_FLEET_TOKEN_REF = 'DSHIM_FLEET_TOKEN'       # 存放 token 的环境�
 
 - `runtime`：`desktop` 表示桌面应用自己的宿主进程，任何停止操作都跳过它；`node` 表示普通 web 实例。判据是宿主被要求运行的入口脚本，因此环境变量（`ELECTRON_RUN_AS_NODE`）只作为诊断字段：桌面端启动的 web 实例同样带该变量。
 - `launcher`：启动该实例的宿主类型，`desktop` 或 `web`；`parentPid`：发起启动的宿主 pid。两者由打过补丁的宿主注入，取不到时为 `null`，只写进心跳文件，不出现在 `action=self` 应答、agent 工具行与面板里。
-- 宿主不回报 `runtime` 时，其行按 `node` 处理。
+- 本插件回报的行若不带 `runtime`，按 `node` 处理；只能靠端口探测发现的行不带该字段。
 - `name` 是列表进程自己的可执行文件名，同一份列表里每行相同，不是被列实例的身份；实例身份由 `runtime`、`pid` 与 `version` 区分。
 
 ## 安全
@@ -127,20 +128,46 @@ $env:DSHIM_FLEET_TOKEN_REF = 'DSHIM_FLEET_TOKEN'       # 存放 token 的环境�
 - 事件流与所有 JSON 应答携带 `cache-control: no-store`。
 - 意外失败的 500 仅返回固定 `code`，异常原文只写入宿主日志。
 - Fleet token 没有操作级权限划分，持有者可启动或停止本机实例并读取会话信息，应仅授予可信设备。
-- DSH 0.1.0-rc.7 及之后，浏览器 API 与事件流复用 Connection 的签名 cookie，准入由 Connection 的 Host/Origin 校验与 cookie 判定，插件自带守卫不参与。
+- 宿主挂载了 Connection 时，浏览器 API 与事件流复用其签名 cookie；准入由 Connection 的 Host/Origin 校验与 cookie 判定，插件自带守卫不参与。
 - 内部实例确认与转发只走严格 loopback 探测，SSE 仅向本机开放。
 - 每个被接受的写操作在 `<home>/launcher/logs/dshim-requests.log` 记录一行：对端地址、准入路径、请求携带的 `Host`/`Origin`/`Referer`/`User-Agent`、目标端口与结果。
 - `dshim-selfexit.log` 只记录触发者；Cookie 与 Authorization 既不读取也不写入。
 
+## 诊断记录
+
+实例静默消失时，面板抽屉的「诊断」标签给出该实例的三份记录，每份都是最近 200 行：
+
+- 崩溃黑匣子 `dshim-crash.log`：进程崩溃或未处理的 Promise 拒绝时写下一行头加异常栈。
+- 自退出记录 `dshim-selfexit.log`：每次以本进程退出收尾的路由写一行，说明是崩溃还是被要求离开。
+- 写操作追踪 `dshim-requests.log`：每个被接受的写操作一行，含对端地址、准入路径、`Host`/`Origin`/`Referer`/`User-Agent`、目标端口与结果。
+
+- 三份文件由本机所有实例共用，因此崩溃与自退出按该实例的 pid 筛选，写操作按实例端口筛选。
+- 诊断面只接受本机回环请求，且不做 fleet 转发：持有有效 fleet bearer 的对端与受信局域网浏览器都读不到它。远端行因此没有这个标签。
+- 崩溃记录的筛选保留整条记录（头与异常栈），因此栈不会落到另一个实例名下。
+- 这三份文件从未被读取也从未被清理；诊断面只读，不删除、不改写。
+
+## 会话字段
+
+会话摘要的每一行都是纯标量投影，绝不整体序列化宿主内部的实时 session 对象。
+
+- `title`：折叠后的最新会话标题，来自宿主可选的 `sessionTitle` 服务。宿主没有该服务、或会话还没有合格输入时该字段不出现，此时面板退回 8 位短 id。
+- `agentPreset`、`parentSession`、`delegationDepth`：来自会话 header 的谱系，缺失即不出现。委派深度只在真正被委派过时带上，顶层会话不带。
+- `cwd`、`subagent`、`events`：工作目录、子代理标记与事件数。
+- 这些字段全部可选。跨版本 fleet 中，旧实例的应答里没有它们，本插件的输出 schema 是封闭的，因此投影按类型逐个采纳、缺失即省略，而不是写入 `null`。
+
+## 原地重启
+
+实例行的「重启」按钮与 agent 工具 `instance_restart` 在**同一端口**重启一个本地实例，替代手动 stop + start 两步。步骤固定为：转发停止（目标经自己的 `appExit` 优雅退出，会话落盘）→ 轮询等待端口真正空出来 → 在该端口启动 → 等它应答 `action=self`。
+
+- **stop 与 start 之间端口是空的。** 窗口期内被别的进程抢到，重启失败并返回 `port_in_use`；端口在 15 秒内仍未释放则返回 `port_still_in_use`，两种情况都不会启动到其他端口——用户要的就是原端口重启，换端口等于换了一个实例。
+- 不重启当前实例：提供面板的进程会随重启一起离开，浏览器只会看到一次失败的点击。请手动重启本机 dsh。
+- 不重启桌面宿主，与停止操作的理由相同。
+- 远端行不可重启。
+- 面板触发的重启把启动 token 交接给浏览器，新实例因此能直接打开；agent 工具触发的重启保持无头（启动参数带 `--no-open`）。
+
 ## 开发
 
-提交前运行：
-
-```sh
-npm test
-npm run docs:check
-npm pack --dry-run
-```
+工程边界与提交前检查见 [AGENTS.md](https://github.com/xswt442-cmd/dsh-instance-manager/blob/main/AGENTS.md)；发布流程见 [docs/RELEASING.md](https://github.com/xswt442-cmd/dsh-instance-manager/blob/main/docs/RELEASING.md)。
 
 ## License
 

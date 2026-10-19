@@ -3,11 +3,8 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import vm from 'node:vm'
 
-// The browser half owns no dock of its own any more: the launcher is one entry
-// in the host's `conversation.composer.dock` seat, and the panel plus the fleet
-// toasts stay on `shell.overlay`. Both halves of that split are asserted here,
-// because a registration that silently never happens leaves the UI with nothing
-// to click and no error anywhere.
+// 浏览器侧的注册面：launcher 菜单一行、launcher 自身、面板与 fleet 提示。注册静静
+// 地没有发生，界面就没有可点的入口，也不会在任何地方报错，因此这里逐项断言。
 test('the client registers a composer-dock launcher and two overlay surfaces', () => {
   let definition = null
   let styleElement = null
@@ -53,8 +50,7 @@ test('the client registers a composer-dock launcher and two overlay surfaces', (
 
   const slots = {
     inject(name, mount) {
-      // This plugin's row joins the launcher menu; its panel and toasts ride the
-      // frame-wide overlay layer.
+      // 本插件的行加入 launcher 菜单；面板与提示挂在整帧的 overlay 层。
       assert.ok(name === 'createhelper.utility.item' || name === 'shell.overlay', name)
       mount()
     },
@@ -64,8 +60,8 @@ test('the client registers a composer-dock launcher and two overlay surfaces', (
   }
   let injected = null
   plugin.apply({
-    // The plugin must not probe `slots` with a one-shot get: a miss leaves the
-    // panel absent with nothing reported. It waits through ctx.inject instead.
+    // 插件不得只探测一次 `slots`：错过会让面板消失且没有任何报告。它通过
+    // ctx.inject 等待。
     inject(names, mount) {
       injected = names
       if (Array.from(names).indexOf('locale') !== -1) {
@@ -96,8 +92,7 @@ test('the client registers a composer-dock launcher and two overlay surfaces', (
     },
     on() {}
   })
-  // Compared element-wise: `injected` is created inside the vm sandbox, so its
-  // Array prototype is not reference-equal to this realm's.
+  // 逐元素比较：`injected` 在 vm 沙箱里创建，其 Array 原型与本 realm 不是同一引用。
   assert.equal(Array.isArray(injected), true)
   assert.deepEqual(Array.from(injected), ['settingsScope'],
     'the settings binding is injected last; the slots injection above already ran')
@@ -116,9 +111,8 @@ test('the client registers a composer-dock launcher and two overlay surfaces', (
     'shell.overlay',
     'shell.overlay'
   ])
-  // The launcher declares the menu's child seat, which is what authorizes every
-  // plugin to contribute a row to it. JSON round-tripped: the options come
-  // from the vm sandbox, so their prototypes are not this realm's.
+  // launcher 声明菜单的子座位，其他插件因此有权向其中贡献一行。用 JSON 往返转换：
+  // 选项来自 vm 沙箱，原型不属于本 realm。
   assert.deepEqual(JSON.parse(JSON.stringify(registered[1].options.children)), {
     'createhelper.utility.item': { kind: 'list', scope: 'root' }
   })
@@ -128,19 +122,22 @@ test('the client registers a composer-dock launcher and two overlay surfaces', (
   assert.equal((source.match(/appTitle: 'DSH Instance'/g) || []).length, 2,
     'both panel languages use the same product title')
 
-  // Nothing may go back to floating a container over the page: that container is
-  // what covered the composer's own controls, and the host seat replaces it.
+  // 客户端不得在 body 上挂浮层容器：那种容器会遮住输入区自己的控件，宿主座位取代了
+  // 它的位置。
   assert.equal(bodyChild, null, 'the client must not append a floating container to body')
   assert.equal(context.window.__CREATEHELPER_DSH_UTILITY_DOCK_V1__, undefined,
     'the retired page-local dock protocol stays out of the bundle')
   assert.doesNotMatch(source, /getUtilityDock|CREATEHELPER_DSH_UTILITY_DOCK/)
+
+  // 抽屉的内存走势头部依赖这个类名，样式表必须声明同一拼写。
+  assert.match(styleElement.textContent, /\.dshim-sparhead\{/)
+  assert.match(source, /className: 'dshim-sparhead'/)
 })
 
 test('0.1.7 serves preferences through configForms, which wins over a concurrent settingsScope', () => {
-  // The service was renamed: `settingsScope.bind()` up to 0.1.5,
-  // `configForms.get(ns)` from 0.1.7-rc.1. Both are injected at runtime, so
-  // whichever exists binds — and when both are somehow present the newer one
-  // must be the only binder, or preferences would be applied twice.
+  // 该服务改过名字：0.1.5 及以前是 `settingsScope.bind()`，0.1.7-rc.1 起是
+  // `configForms.get(ns)`。两者都是运行时注入，存在哪个就用哪个绑定——两者同时存在
+  // 时只有较新的那个可以绑定，否则偏好会被应用两次。
   let definition = null
   let styleElement = null
   const source = fs.readFileSync(new URL('../lib/client.js', import.meta.url), 'utf8')

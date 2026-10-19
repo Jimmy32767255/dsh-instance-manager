@@ -1,5 +1,5 @@
-// Unit tests for the pure host-side helpers in lib/shared.js.
-// Runs on the stock node:test runner (`npm test`) — no dev dependencies.
+// lib/shared.js 中宿主侧纯函数的单元测试。
+// 运行在普通 node:test 上（`npm test`），不需要开发依赖。
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
@@ -25,10 +25,14 @@ import {
   isValidRegistryEntry,
   normalizePort,
   tailFile,
+  selectCrashRecords,
+  selectSelfExitLines,
+  selectRequestLines,
   unionPorts,
   summarizeSessions,
   orderInstances,
   awaitChild,
+  awaitPortFree,
   managedLocalPorts,
   diffManagedPorts,
   parsePortSpec,
@@ -62,8 +66,8 @@ test('RC1 launch args split browser token handoff from headless agent starts', (
 })
 
 test('detectRuntime recognises the desktop host by its entry script', () => {
-  // The desktop app's own host: the same exe, running the desktop-host entry
-  // point unpacked from app.asar.
+  // 桌面应用自己的宿主：同一个可执行文件，运行从 app.asar 解包的 desktop-host
+  // 入口。
   assert.equal(detectRuntime([
     'E:\\DSH\\DeepSeek Harness.exe',
     '--expose-internals',
@@ -74,10 +78,9 @@ test('detectRuntime recognises the desktop host by its entry script', () => {
 })
 
 test('an Electron-launched web instance stays node, not desktop', () => {
-  // Measured counterexample: the desktop panel spawns plain web instances from
-  // the app's own executable, and they inherit ELECTRON_RUN_AS_NODE=1. The env
-  // flag is therefore reported but never decisive — treating it as "desktop"
-  // would leave an ordinary web instance impossible to stop.
+  // 实测反例：桌面面板用应用自己的可执行文件派生普通 web 实例，它们继承了
+  // ELECTRON_RUN_AS_NODE=1。该环境标记因此只上报、从不参与判定——把它当成
+  // “desktop”会让普通 web 实例无法被停止。
   const argv = [
     'E:\\DSH\\DeepSeek Harness.exe',
     '--trace-exit',
@@ -89,10 +92,9 @@ test('an Electron-launched web instance stays node, not desktop', () => {
   assert.equal(isElectronNode({ ELECTRON_RUN_AS_NODE: '1' }, { electron: '38.0.0' }), true)
   assert.equal(isElectronNode({}, { electron: '38.0.0' }), true)
   assert.equal(isElectronNode({}, {}), false)
-  // Called with its defaults this reads the LIVE environment, which inside the
-  // desktop's own process tree already carries the flag — for this plain node
-  // test runner too. That is exactly why the flag must not decide the runtime,
-  // so only its type is asserted here rather than a host-dependent value.
+  // 不带参数调用时读取的是 LIVE 环境，桌面自己的进程树里已经带有该标记——普通 node
+  // 测试运行器同样如此。这正是该标记不能决定运行时的原因，因此这里只断言类型，
+  // 不断言依赖主机的值。
   assert.equal(typeof isElectronNode(), 'boolean')
 })
 
@@ -110,7 +112,7 @@ test('launcherOf and parentPidOf read the spawn markers and fail to null', () =>
   assert.equal(launcherOf({}), null)
   assert.equal(launcherOf(undefined), null)
   assert.equal(parentPidOf({ [PARENT_PID_ENV]: '4242' }), 4242)
-  // 0, negatives and junk are "unknown", not a pid.
+  // 0、负数和垃圾值都是“未知”，不是 pid。
   for (const bad of ['0', '-3', '12.5', '1e3', 'abc', '']) {
     assert.equal(parentPidOf({ [PARENT_PID_ENV]: bad }), null, bad)
   }
@@ -126,13 +128,13 @@ test('buildSpawnEnv forces ELECTRON_RUN_AS_NODE on the desktop and keeps inherit
   assert.equal(desktop[PARENT_PID_ENV], '99')
   assert.equal(desktop.PATH, '/bin')
   assert.equal(base[LAUNCHER_ENV], undefined, 'the base env must not be mutated')
-  // A web instance started FROM the desktop inherits the flag and must keep it:
-  // the same Electron exe is the node runtime only while that flag is set.
+  // 从桌面启动的 web 实例继承该标记，并且必须保留：同一个 Electron 可执行文件只有
+  // 在该标记存在时才是 node 运行时。
   const inherited = buildSpawnEnv({ ELECTRON_RUN_AS_NODE: '1' }, { runtime: 'node', parentPid: 42 })
   assert.equal(inherited.ELECTRON_RUN_AS_NODE, '1')
   assert.equal(inherited[LAUNCHER_ENV], 'web')
   assert.equal(inherited[PARENT_PID_ENV], '42')
-  // A plain node host adds neither.
+  // 普通 node 宿主两个都不添加。
   const plain = buildSpawnEnv({ PATH: '/bin' }, { runtime: 'node', parentPid: null })
   assert.equal(plain.ELECTRON_RUN_AS_NODE, undefined)
   assert.equal(plain[LAUNCHER_ENV], 'web')
@@ -145,8 +147,8 @@ test('dshBinVersion reads the package beside the launcher and degrades to null',
   const read = (f) => { asked = f; return JSON.stringify({ name: '@deepseek-ai/dsh', version: '0.2.0-rc.1' }) }
   assert.equal(dshBinVersion(bin, read), '0.2.0-rc.1')
   assert.equal(asked, path.join('C:', 'Users', 'x', '.dsh', 'profiles', 'node_modules', '@deepseek-ai', 'dsh', 'package.json'))
-  // A missing, unreadable or versionless package reports "unknown" instead of
-  // throwing: the start itself succeeded and must still be reported.
+  // 缺少、不可读或没有版本的 package 报告“未知”而不是抛出：启动本身已经成功，
+  // 仍须上报。
   assert.equal(dshBinVersion(bin, () => 'not json'), null)
   assert.equal(dshBinVersion(bin, () => { throw new Error('ENOENT') }), null)
   assert.equal(dshBinVersion(bin, () => JSON.stringify({ name: 'x' })), null)
@@ -168,23 +170,21 @@ test('isLoopbackName rejects foreign and empty names', () => {
   assert.equal(isLoopbackName('::ffff:8.8.8.8'), false)
   assert.equal(isLoopbackName(''), false)
   assert.equal(isLoopbackName(undefined), false)
-  // The allowlist is exact spellings only — the v4-mapped v6 form of 127.0.0.1
-  // is accepted because it maps to an allowlisted name, not by being listed.
+  // 允许列表只接受确切的写法——127.0.0.1 的 v4-mapped v6 形式之所以被接受，是因为
+  // 它映射到允许列表中的名字，而不是因为它被列入了名单。
   assert.equal(isLoopbackName('127.0.0.2'), false)
   assert.equal(isLoopbackName('api.localhost'), false)
 })
 
-// Regression: the loopback predicates arrive here through a generated block
-// (the `dsh-loopback-helpers` marker in lib/shared.js). This repo previously
-// carried a dead '::ffff:127.0.0.1' allowlist entry — unreachable from the
-// Origin path, because the WHATWG URL parser rewrites the dotted form to hex.
-// Both spellings must be loopback, on both paths.
+// 回环谓词来自生成的块（lib/shared.js 的 `dsh-loopback-helpers` 标记）。两种写法
+// 在两条路径上都必须判为回环：WHATWG URL 解析器会把点分形式改写成十六进制，Origin
+// 路径因此只会看到后者。
 test('the IPv4-mapped IPv6 loopback form is loopback in both spellings', () => {
   for (const name of ['::ffff:127.0.0.1', '::ffff:7f00:1', '::FFFF:7F00:1']) {
     assert.ok(isLoopbackName(name), name)
     assert.ok(isLoopbackName(hostHostname(`[${name}]:3080`)), `bracketed: ${name}`)
   }
-  // Non-loopback mapped addresses stay non-loopback.
+  // 非回环的映射地址仍不是回环。
   for (const name of ['::ffff:10.0.0.1', '::ffff:8.8.8.8']) {
     assert.equal(isLoopbackName(name), false, name)
   }
@@ -199,15 +199,14 @@ test('hostHostname strips ports and brackets', () => {
   assert.equal(hostHostname(undefined), '')
 })
 
-// Guard harness: records rejections instead of touching a real response.
+// 守卫测试装置：记录拒绝内容，不接触真实响应。
 const makeGuard = (currentPort = () => 3080) => {
   const rejections = []
   const respond = (res, code, obj) => { rejections.push({ code, obj }) }
   return { guard: createGuard({ currentPort, respond }), rejections }
 }
-// A real HTTP request always carries a socket peer; default it to loopback
-// (local browser/UI) so the happy path is exercised, and let a test pass a
-// forged off-loopback address to simulate a remote attacker.
+// 真实 HTTP 请求总带有 socket 对端；默认设为回环（本机浏览器/界面）以走正常路径，
+// 测试也可以传入伪造的非回环地址来模拟远端攻击者。
 const reqOf = (headers, remoteAddress) =>
   ({ headers, socket: { remoteAddress: remoteAddress || '127.0.0.1' } })
 
@@ -268,13 +267,13 @@ test('guard allowRemoteHost defers non-loopback Hosts to bearer verification', (
   const rejections = []
   const respond = (res, code, obj) => { rejections.push({ code, obj }) }
   const fleetGuard = createGuard({ currentPort: () => 3080, respond, allowRemoteHost: () => true })
-  // Non-loopback Host passes the guard; the HANDLER owns the bearer gate.
+  // 非回环 Host 通过守卫；bearer 检查由处理器负责。
   assert.equal(fleetGuard(reqOf({ host: 'box.lan:3080' })), true)
-  // Defense-in-depth unchanged: foreign cross-site traffic still rejected.
+  // 纵深防御不变：外来的跨站流量仍被拒绝。
   assert.equal(fleetGuard(reqOf({ origin: 'https://evil.example', host: 'box.lan:3080' })), false)
   assert.equal(fleetGuard(reqOf({ 'sec-fetch-site': 'cross-site', host: 'box.lan:3080' })), false)
 
-  // Without the flag, behavior is byte-for-byte the old strict mode.
+  // 没有该开关时，行为与严格模式完全一致。
   const strictGuard = createGuard({ currentPort: () => 3080, respond })
   assert.equal(strictGuard(reqOf({ host: 'box.lan:3080' })), false)
   assert.equal(rejections.some((r) => r.obj.code === 'bad_host'), true)
@@ -298,13 +297,12 @@ test('guard requires the fleet bearer for an off-loopback TCP peer (closes forge
   const rejections = []
   const respond = (res, code, obj) => { rejections.push({ code, obj }) }
   const fleetGuard = createGuard({ currentPort: () => 3080, respond, allowRemoteHost: () => true })
-  // Remote attacker forges a loopback Host and omits Origin/Sec-Fetch-Site —
-  // the OLD guard passed this and skipped the bearer. The peer address is the
-  // only unforgeable signal, so the guard now treats it as remote.
+  // 远端攻击者伪造回环 Host 并省略 Origin/Sec-Fetch-Site——只按 Host 判断会放行并
+  // 跳过 bearer。对端地址是唯一不可伪造的信号，因此守卫把它当作远端。
   assert.equal(fleetGuard(reqOf({ host: '127.0.0.1:3080' }, '203.0.113.5')), true,
     'guard defers to the handler; bearer is enforced there')
-  // The strict (events) guard has no fleet mode, so the same off-loopback peer
-  // is rejected outright — pure hardening, no legitimate local request uses it.
+  // 严格（events）守卫没有 fleet 模式，同样的非回环对端直接被拒绝——这是纯加固，
+  // 没有任何合法的本地请求会走这条路。
   const strictGuard = createGuard({ currentPort: () => 3080, respond })
   assert.equal(strictGuard(reqOf({ host: '127.0.0.1:3080' }, '203.0.113.5')), false)
   assert.equal(rejections.at(-1).obj.code, 'bad_host')
@@ -328,10 +326,9 @@ test('guard fails closed when the socket peer is missing (cannot identify caller
 })
 
 test('guard fails closed on a blank peer address (empty string identifies nobody)', () => {
-  // Regression: the guard only tested `peerAddress == null`, so an empty
-  // remoteAddress passed as "not remote" even though it identifies no caller.
-  // `reqOf` cannot express this case — it defaults a falsy address back to
-  // loopback — so these request objects are built by hand.
+  // 守卫必须把空地址当作“未识别”而不是“非远端”：空白的 remoteAddress 不能说明
+  // 任何调用方身份。`reqOf` 无法表达这种情况——它会把假值地址默认成回环——因此这些
+  // 请求对象手工构造。
   const rejections = []
   const respond = (res, code, obj) => { rejections.push({ code, obj }) }
   const fleetGuard = createGuard({ currentPort: () => 3080, respond, allowRemoteHost: () => true })
@@ -339,8 +336,8 @@ test('guard fails closed on a blank peer address (empty string identifies nobody
     assert.equal(fleetGuard({ headers: { host: '127.0.0.1:3080' }, socket: { remoteAddress: blank } }), false, JSON.stringify(blank))
     assert.equal(rejections.at(-1).obj.code, 'unknown_peer')
   }
-  // The route-level decision has to agree with the guard: if one of them
-  // treats an unidentified caller as local, the bearer gate is bypassable.
+  // 路由层判定必须与守卫一致：任一者把未识别的调用方当作本地，bearer 关卡就可被
+  // 绕过。
   assert.equal(requestNeedsBearer({ headers: { host: '127.0.0.1:3080' }, socket: { remoteAddress: '' } }), true)
 })
 
@@ -354,14 +351,14 @@ test('requestNeedsBearer mirrors the guard: peer OR Host off-loopback demands th
 })
 
 test('guard accepts a same-origin request whose default port is omitted (service on 80)', () => {
-  // Regression (P2): WHATWG normalises `http://127.0.0.1` to port "", which the
-  // old `String(o.port || '')` compared against "80" and rejected as bad_origin.
+  // WHATWG 会把 `http://127.0.0.1` 的端口归一化为 ""，若直接与 "80" 比较会误判为
+  // bad_origin；默认端口必须按 scheme 补全。
   const { guard, rejections } = makeGuard(() => 80)
   assert.equal(guard(reqOf({ origin: 'http://127.0.0.1' })), true)
   assert.equal(guard(reqOf({ origin: 'http://127.0.0.1:80' })), true)
   assert.equal(guard(reqOf({ host: '127.0.0.1' })), true)
   assert.equal(rejections.length, 0)
-  // A genuinely foreign default-port origin is still rejected.
+  // 真正异源的默认端口 Origin 仍被拒绝。
   const { guard: g2, rejections: r2 } = makeGuard(() => 80)
   assert.equal(g2(reqOf({ origin: 'http://10.0.0.9' })), false)
   assert.equal(r2.at(-1).obj.code, 'bad_origin')
@@ -385,11 +382,11 @@ test('resolveDshBin prefers the running entry script when it looks like one', ()
 
 test('resolveDshBin falls back to the profile path built with path.join', () => {
   const expected = path.join('/h', 'profiles', 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js')
-  // argv1 missing entirely -> fallback
+  // 完全没有 argv1 -> 回退
   assert.equal(resolveDshBin({ argv1: '', home: '/h', exists: () => true }), expected)
-  // argv1 exists but does not look like bin.js -> fallback
+  // argv1 存在但不像 bin.js -> 回退
   assert.equal(resolveDshBin({ argv1: '/somewhere/cli.mjs', home: '/h', exists: () => true }), expected)
-  // argv1 named bin.js but absent on disk -> fallback
+  // argv1 名为 bin.js 但磁盘上不存在 -> 回退
   assert.equal(
     resolveDshBin({ argv1: '/gone/bin.js', home: '/h', exists: (f) => f === expected }),
     expected
@@ -400,8 +397,8 @@ test('resolveDshBin resolves empty when neither candidate exists', () => {
   assert.equal(resolveDshBin({ argv1: '', home: '/h', exists: () => false }), '')
 })
 
-// The port is interpolated into the launcher log filename, so this function
-// is the only thing standing between a fleet peer and a path traversal.
+// 端口会被拼进启动器日志文件名，因此这个函数是 fleet 对端与路径穿越之间的唯一
+// 屏障。
 test('normalizePort accepts exactly the integers in [1, 65535]', () => {
   assert.equal(normalizePort(1), 1)
   assert.equal(normalizePort(3080), 3080)
@@ -411,7 +408,7 @@ test('normalizePort accepts exactly the integers in [1, 65535]', () => {
 })
 
 test('normalizePort rejects everything that is not a bare integer in range', () => {
-  // Path traversal — the reason this function exists.
+  // 路径穿越——这个函数存在的原因。
   for (const bad of [
     '../'.repeat(8) + 'Windows/win.ini',
     '..\\..\\..\\..\\secret',
@@ -419,7 +416,7 @@ test('normalizePort rejects everything that is not a bare integer in range', () 
   ]) {
     assert.equal(normalizePort(bad), null, bad)
   }
-  // Non-integers, out-of-range, and coercions that only "look" numeric.
+  // 非整数、越界，以及只是“看起来”像数字的强制转换。
   for (const bad of [
     0, -1, 65536, 80.5, NaN, Infinity, -Infinity,
     '', '   ', '80abc', 'abc', '1e3', '0x10', '+80',
@@ -467,7 +464,7 @@ test('unionPorts merges the sweep range with out-of-range heartbeat ports', () =
   assert.deepEqual(unionPorts(3080, 3080, [250, 80]), [80, 250, 3080])
 })
 
-// ---- fleet list order -----------------------------------------------------
+// ---- fleet 列表顺序 -------------------------------------------------------
 
 test('orderInstances pins the current instance first', () => {
   const rows = [
@@ -490,9 +487,8 @@ test('orderInstances sorts everything else by ascending port, local or remote', 
 })
 
 test('orderInstances lets port outrank the source id', () => {
-  // A peer row without a lower port must not jump ahead of a local one: the
-  // two share a port column, and breaking the ascending scan is what the
-  // current-row pin exists to avoid.
+  // 端口更高的对端行不能跳到本机行前面：两者共用一列端口，破坏升序浏览正是当前行
+  // 置顶规则要避免的。
   const rows = [
     { port: 3080, current: false },
     { port: 3090, current: false, remote: true, source: 'aaa' }
@@ -501,8 +497,7 @@ test('orderInstances lets port outrank the source id', () => {
 })
 
 test('orderInstances is stable across equals and never mutates its input', () => {
-  // Two machines can both list :3080; the source id keeps them from swapping
-  // position between polls.
+  // 两台机器可以都列出 :3080；source id 防止它们在轮询之间互换位置。
   const rows = [
     { port: 3080, current: false, remote: true, source: 'zulu' },
     { port: 3080, current: false, remote: true, source: 'alpha' }
@@ -512,12 +507,11 @@ test('orderInstances is stable across equals and never mutates its input', () =>
   assert.deepEqual(rows, original, 'input order untouched')
   assert.deepEqual(orderInstances(undefined), [])
   assert.deepEqual(orderInstances(null), [])
-  // Rows missing port/current/remote sort without throwing; the current row
-  // still wins.
+  // 缺少 port/current/remote 的行排序时不抛出；当前行仍然优先。
   assert.equal(orderInstances([{ current: true }, {}])[0].current, true)
 })
 
-// ---- session summaries ----------------------------------------------------
+// ---- 会话摘要 -------------------------------------------------------------
 
 test('summarizeSessions extracts scalar fields, sorts newest-first, caps', () => {
   const sessions = [
@@ -530,7 +524,7 @@ test('summarizeSessions extracts scalar fields, sorts newest-first, caps', () =>
   assert.deepEqual(rows[1], { id: 'ccc', createdAt: 150, events: 0 }, 'empty cwd pruned, zero events kept')
   assert.equal(rows[2].cwd, '/work/alpha')
   assert.equal(rows[2].subagent, true)
-  // Non-summaries are skipped, never thrown over.
+  // 非摘要项被跳过，绝不因此抛出。
   assert.deepEqual(summarizeSessions([null, {}, { id: 'x' }, 'junk', sessions[0]]).map((r) => r.id), ['aaa'])
   assert.equal(summarizeSessions(undefined).length, 0)
 })
@@ -544,12 +538,177 @@ test('summarizeSessions caps at N newest rows', () => {
   assert.equal(rows[0].id, 's29', 'cap keeps the NEWEST rows')
 })
 
-// ---- fleet up/down diff ---------------------------------------------------
+// ---- 会话摘要的标题与谱系 -------------------------------------------------
+//
+// 标题与谱系都来自可选服务或可选的 header 字段，因此两条性质必须同时成立：有值时
+// 出现在摘要里；没有值时摘要与它不存在之前逐字节相同——后者是跨版本 fleet 的前提，
+// 旧实例的应答会原样穿过本插件。
 
-// ---- launcher child: ready / exited / failed-to-spawn --------------------
-// The 'error' case is the one that matters: a ChildProcess that cannot start
-// emits 'error' and NO 'exit', and an unlistened 'error' event is process-fatal,
-// so 'error' is always consumed and a failed launch is only ever reported.
+test('summarizeSessions adds the title when the host provides one', () => {
+  const rows = summarizeSessions(
+    [{ id: 'a', header: { createdAt: 1 } }, { id: 'b', header: { createdAt: 2 } }],
+    20,
+    { titleOf: (s) => (s.id === 'a' ? '修复登录' : undefined) }
+  )
+  assert.equal(rows[1].title, '修复登录')
+  assert.equal('title' in rows[0], false, '没有合格输入的会话省略该键，而不是写 null')
+})
+
+test('summarizeSessions adds lineage from the session header', () => {
+  const rows = summarizeSessions([
+    {
+      id: 'child',
+      header: {
+        createdAt: 30,
+        origin: 'subagent',
+        agentPreset: 'reviewer',
+        parentSession: 'abcdef0123456789',
+        delegationDepth: 2
+      }
+    },
+    { id: 'top', header: { createdAt: 20, agentPreset: '', parentSession: '', delegationDepth: 0 } }
+  ])
+  assert.deepEqual(rows[0], {
+    id: 'child', createdAt: 30, subagent: true, agentPreset: 'reviewer',
+    parentSession: 'abcdef0123456789', delegationDepth: 2
+  })
+  assert.deepEqual(rows[1], { id: 'top', createdAt: 20 },
+    '顶层会话的深度 0、空预设与空父会话都省略：深度 1 与"没有父会话"对读者是两件事')
+})
+
+// 跨版本 fleet 的前提：缺少标题服务时，摘要必须与增补之前逐字节相同，而不是多出
+// 一个 null 或空串——本插件的输出 schema 声明 additionalProperties: false，混入
+// 编造的键会让对端整个工具结果校验失败。
+test('summarizeSessions without a title service is byte-identical to the pre-enrichment shape', () => {
+  const sessions = [
+    { id: 'aaa', header: { createdAt: 100, cwd: '/work/alpha', origin: 'subagent' }, seq: 7 },
+    { id: 'bbb', header: { createdAt: 200 } },
+    { id: 'ccc', header: { createdAt: 150, cwd: '' }, seq: 0 }
+  ]
+  // 增补之前那一份投影的确定形式。
+  const before = [
+    { id: 'bbb', createdAt: 200 },
+    { id: 'ccc', createdAt: 150, events: 0 },
+    { id: 'aaa', createdAt: 100, cwd: '/work/alpha', subagent: true, events: 7 }
+  ]
+  assert.equal(JSON.stringify(summarizeSessions(sessions)), JSON.stringify(before),
+    '省略 titleOf 时，摘要与增补之前逐字节相同')
+  // 取值函数存在但没有服务（本插件的降级路径）同样如此。
+  assert.equal(JSON.stringify(summarizeSessions(sessions, 20, { titleOf: () => undefined })), JSON.stringify(before))
+  // 抛出也不能让摘要变形：服务可以在会话释放后失效。
+  assert.equal(
+    JSON.stringify(summarizeSessions(sessions, 20, { titleOf: () => { throw new Error('disposed') } })),
+    JSON.stringify(before)
+  )
+})
+
+test('summarizeSessions ignores a non-string title from the resolver', () => {
+  const rows = summarizeSessions([{ id: 'a', header: { createdAt: 1 } }], 20, {
+    titleOf: () => null
+  })
+  assert.deepEqual(rows, [{ id: 'a', createdAt: 1 }])
+})
+
+test('awaitPortFree waits for the listener to settle and never returns a busy port', async () => {
+  // 时钟由测试注入：结论必须是「端口确实空出来了」，而不是「等够了这么久」。
+  let probes = 0
+  const sleeping = []
+  const sleep = () => new Promise((resolve) => { sleeping.push(resolve) })
+  const nextTurn = () => new Promise((resolve) => setImmediate(resolve))
+  const wakeOne = async () => {
+    const w = sleeping.shift()
+    assert.ok(w, 'the wait loop must be sleeping on its injected clock')
+    w()
+    await nextTurn()
+  }
+  let now = 0
+  const clock = () => now
+  // 第三次探测才空出来：模拟优雅退出刷写会话之后监听器才结算。
+  const available = async (port) => {
+    probes += 1
+    assert.equal(port, 3080)
+    return probes >= 3
+  }
+  const pending = awaitPortFree({ port: 3080, available, timeoutMs: 10_000, sleep, now: clock })
+  assert.equal(await nextTurn(), undefined)
+  await wakeOne()
+  await wakeOne()
+  assert.equal(await pending, true, '端口空出来就立即返回，不把窗口用尽')
+  assert.equal(probes, 3)
+})
+
+test('awaitPortFree answers false when the port is never released', async () => {
+  let probes = 0
+  let slept = 0
+  const clock = { value: 0 }
+  const pending = awaitPortFree({
+    port: 3080,
+    available: async () => { probes += 1; return false },
+    timeoutMs: 1000,
+    sleep: async () => { slept += 1; clock.value += 300 },
+    now: () => clock.value
+  })
+  assert.equal(await pending, false, '窗口用尽时必须如实报告端口仍在使用')
+  assert.ok(probes >= 2 && slept >= 1, '它确实轮询过，而不是一次就放弃')
+})
+
+// ---- 诊断记录的实例归属 --------------------------------------------------
+//
+// 三份诊断文件由本机所有实例共用，筛选必须在共享的行里挑出属于某个实例的那些。
+// 崩溃记录最容易错：异常栈跨多行，只按头筛选会让栈泄漏到别的实例名下，或者整条
+// 记录被丢掉——那正是"实例为什么消失了"唯一的证据。
+
+test('crash records keep their whole stack when filtered by pid', () => {
+  const lines = [
+    '[2026-01-02T03:04:05.000Z] uncaughtException pid=41 port=3080',
+    'Error: boom',
+    '    at tick (/tmp/a.js:1:1)',
+    '[2026-01-02T03:05:05.000Z] unhandledRejection pid=42 port=3081',
+    'Error: other',
+    '    at tick (/tmp/b.js:2:2)',
+    '    at again (/tmp/b.js:3:3)'
+  ]
+  assert.deepEqual(selectCrashRecords(lines, 41), lines.slice(0, 3),
+    '头与栈必须一起保留，另一实例的记录不得混入')
+  assert.deepEqual(selectCrashRecords(lines, 42), lines.slice(3),
+    '第二个实例拿到的是自己的头加两行栈')
+  assert.deepEqual(selectCrashRecords(lines, 99), [],
+    '没有记录的实例返回空，而不是别人的记录')
+})
+
+test('crash and self-exit lines fall back to the whole file without a valid pid', () => {
+  const crash = ['[2026-01-02T03:04:05.000Z] uncaughtException pid=41 port=3080', 'Error: boom']
+  const exits = ['[2026-01-02T03:04:06.000Z] self-exit trigger=stop-self pid=41 port=3080']
+  for (const pid of [null, undefined, 0, -1, 1.5, '41']) {
+    assert.deepEqual(selectCrashRecords(crash, pid), crash, 'pid=' + pid)
+    assert.deepEqual(selectSelfExitLines(exits, pid), exits, 'pid=' + pid)
+  }
+  assert.deepEqual(selectCrashRecords(undefined, 41), [])
+})
+
+test('self-exit and request lines filter by whole token, never by prefix', () => {
+  const exits = [
+    '[2026-01-02T03:04:06.000Z] self-exit trigger=stop-self pid=4 port=3080',
+    '[2026-01-02T03:04:07.000Z] self-exit trigger=stop-self pid=41 port=3081'
+  ]
+  assert.deepEqual(selectSelfExitLines(exits, 4), [exits[0]], 'pid=4 不能匹配 pid=41')
+  assert.deepEqual(selectSelfExitLines(exits, 41), [exits[1]])
+  // 端口在写操作追踪里以 `instance=` 出现，同一个前缀问题因此同样成立。
+  const reqs = [
+    '[2026-01-02T03:04:08.000Z] action=stop instance=3080 target=3081 via=local-browser',
+    '[2026-01-02T03:04:09.000Z] action=stop instance=3081 target=3080 via=local-browser'
+  ]
+  assert.deepEqual(selectRequestLines(reqs, 3080), [reqs[0]])
+  assert.deepEqual(selectRequestLines(reqs, 3081), [reqs[1]])
+  assert.deepEqual(selectRequestLines(reqs, null), reqs, '没有选出实例时整份文件就是全部')
+  assert.deepEqual(selectRequestLines(undefined, 3080), [])
+})
+
+// ---- fleet 上线/下线差异 --------------------------------------------------
+
+// ---- 启动器子进程：就绪 / 退出 / 派生失败 --------------------------------
+// 'error' 情况最关键：无法启动的 ChildProcess 只发 'error'、不发 'exit'，而没有
+// 监听器的 'error' 会让进程退出，因此 'error' 总是被消费，失败的启动只会上报。
 const fakeChild = () => {
   const handlers = {}
   return {
@@ -584,23 +743,16 @@ test('awaitChild resolves ready as soon as the child answers', async () => {
 })
 
 test('awaitChild returns empty (not died) when the confirm window just closes', async () => {
-  // A slow first boot is not a failure: the caller leaves the child alone
-  // rather than spawning a second one.
+  // 首次启动慢不算失败：调用方保持该子进程，而不是再派生一个。
   const child = fakeChild()
   const pending = awaitChild({ child, confirmMs: 0, sleep: noSleep, probe: async () => false })
   assert.deepEqual(await pending, {})
 })
 
 test('awaitChild stops probing once the race has a verdict', async () => {
-  // Regression: the probe loop kept running to the full confirm window after
-  // the race settled, probing a dead child every 500ms and racing a retry
-  // launch's probes.
-  //
-  // The clock here is INJECTED rather than real: the test holds every pending
-  // sleep and hands out exactly the ticks it means to, so "no further probe
-  // fired" is an observed fact. Written against setTimeout it was a race between
-  // a 5ms tick and a 25ms wall-clock window, which failed on a loaded runner
-  // without anything being wrong with the code.
+  // 时钟是注入的而不是真实的：测试持有每一次待决 sleep，只发放它需要的 tick，
+  // “没有再次探测”因此是观察到的事实。若依赖 setTimeout，就变成 5ms tick 与 25ms
+  // 挂钟窗口之间的竞争，在负载高的机器上会无故失败。
   let probes = 0
   const sleeping = []
   const sleep = () => new Promise((resolve) => { sleeping.push(resolve) })
@@ -624,20 +776,18 @@ test('awaitChild stops probing once the race has a verdict', async () => {
     probe: async () => { probes += 1; return false }
   })
   await advance(2)
-  assert.equal(probes, 2, 'the loop is still probing when the verdict lands')
+  assert.equal(probes, 2, '结论产生时循环仍在探测')
 
   child.fire('exit', 1)
   assert.deepEqual(await pending, { died: true, code: 1 })
   await drain()
-  assert.equal(probes, 2, 'no further probe may fire after the race settles')
+  assert.equal(probes, 2, '竞争结算后不得再探测')
 })
 
 test('managedLocalPorts tracks managed LOCAL rows only', () => {
-  // Regression: the SSE baseline seeded this set with an inline
-  // `i.managed` filter while the diff ticker used `i.managed && !i.remote`,
-  // so the first tick after subscribing read every peer port as "removed"
-  // and toasted instance-down for machines that were up the whole time.
-  // Both call sites now share this helper, so they cannot disagree again.
+  // 基线帧与差异轮询必须使用同一个过滤条件：包含远端行时，首次轮询会把每个 peer
+  // 端口都读成“已移除”，为一直在线的主机弹出实例下线提示。两处共用这个辅助函数，
+  // 因此不会再分歧。
   const items = [
     { port: 3080, managed: true },
     { port: 3081, managed: true, remote: true, source: 'office' },
@@ -659,8 +809,8 @@ test('diffManagedPorts reports joins and leaves between ticks', () => {
 })
 
 test('parsePortSpec reads a list spec and falls back silently', () => {
-  // The built-in default sweeps dsh's Web band plus the port the desktop host
-  // takes by default, so a desktop host without this plugin is still found.
+  // 内置默认值扫描 dsh 文档约定的 Web 端口段，以及桌面宿主默认占用的端口，因此未
+  // 挂载本插件的桌面宿主仍能被发现。
   const fallback = { min: 3080, max: 3129, extra: [19387] }
   assert.deepEqual(parsePortSpec(undefined), fallback)
   assert.deepEqual(parsePortSpec(''), fallback)
@@ -668,23 +818,22 @@ test('parsePortSpec reads a list spec and falls back silently', () => {
   assert.deepEqual(parsePortSpec('4000-4010'), { min: 4000, max: 4010, extra: [] })
   assert.deepEqual(parsePortSpec(' 4000 - 4010 '), { min: 4000, max: 4010, extra: [] }, 'whitespace tolerated')
   assert.deepEqual(parsePortSpec('80-80'), { min: 80, max: 80, extra: [] }, 'single-port band allowed')
-  // The first range is also the start range; later ranges are swept only.
+  // 第一个区间也是启动区间；后续区间只用于扫描。
   assert.deepEqual(parsePortSpec('3080-3129,19387'), fallback)
   assert.deepEqual(parsePortSpec('4000, 3080-3082'), { min: 4000, max: 4000, extra: [3080, 3081, 3082] })
   assert.deepEqual(parsePortSpec('3080-3082,3081-3083'), { min: 3080, max: 3082, extra: [3083] },
     'an overlapping range contributes only the ports outside the first')
   assert.deepEqual(parsePortSpec('3080-3129,19387-19390'),
     { min: 3080, max: 3129, extra: [19387, 19388, 19389, 19390] })
-  // invalid shapes and bounds fall back, and a bare single port is now a spec
-  // of its own rather than a rejected range
+  // 形状非法的配置与越界值整体回退；单个裸端口本身就是一份合法配置，不是被拒绝的
+  // 区间。
   assert.deepEqual(parsePortSpec('4000'), { min: 4000, max: 4000, extra: [] })
   assert.deepEqual(parsePortSpec('5000-4000'), fallback)
   assert.deepEqual(parsePortSpec('0-100'), fallback)
   assert.deepEqual(parsePortSpec('1-70000'), fallback)
   assert.deepEqual(parsePortSpec('3080-3129,'), fallback, 'a trailing comma is malformed')
   assert.deepEqual(parsePortSpec('3080-3129,19387,junk'), fallback, 'one bad part rejects the whole spec')
-  // The probe fans out over every port in the spec, so the bound covers the
-  // total, not each range.
+  // 探测会对配置里的每个端口并发发起，因此上限约束的是总数，不是每个区间。
   assert.deepEqual(parsePortSpec('1-65535'), fallback)
   assert.deepEqual(parsePortSpec('3080-4104'), fallback, '1025-wide band is over the bound')
   assert.deepEqual(parsePortSpec('3080-4103'), { min: 3080, max: 4103, extra: [] }, '1024-wide band is still allowed')
@@ -698,7 +847,7 @@ test('tailFile returns whole lines only, bounded by maxLines and maxBytes', asyn
   const { tmpdir } = await import('node:os')
   const dir = mkdtempSync(path.join(tmpdir(), 'dshim-tail-'))
   try {
-    // 30 numbered lines -> last 10 with default-ish cap
+    // 30 行编号文本 -> 在相近的默认上限下取最后 10 行
     writeFileSync(path.join(dir, 'a.log'), Array.from({ length: 30 }, (_, i) => 'line-' + (i + 1)).join('\n') + '\n')
     const t1 = tailFile(path.join(dir, 'a.log'), 65536, 10)
     assert.equal(t1.exists, true)
@@ -707,18 +856,18 @@ test('tailFile returns whole lines only, bounded by maxLines and maxBytes', asyn
     assert.equal(t1.lines[9], 'line-30')
     assert.equal(t1.truncated, true)
 
-    // small file: everything fits, no truncation
+    // 小文件：全部容纳，不截断
     writeFileSync(path.join(dir, 'b.log'), 'hello\nworld\n')
     const t2 = tailFile(path.join(dir, 'b.log'), 65536, 200)
     assert.deepEqual(t2, { exists: true, truncated: false, lines: ['hello', 'world'] })
 
-    // byte bound smaller than the file -> cut leading fragment is dropped
+    // 字节上限小于文件 -> 被截断的首行片段被丢弃
     writeFileSync(path.join(dir, 'c.log'), 'START-cut-line\nwhole-one\nwhole-two\n')
     const t3 = tailFile(path.join(dir, 'c.log'), 24, 200)
     assert.equal(t3.exists, true)
     assert.deepEqual(t3.lines, ['whole-one', 'whole-two'])
 
-    // missing file -> exists:false instead of a throw
+    // 文件缺失 -> exists:false，而不是抛出
     const t4 = tailFile(path.join(dir, 'nope.log'))
     assert.deepEqual(t4, { exists: false, truncated: false, lines: [] })
   } finally {
@@ -733,8 +882,8 @@ test('resolveDshHome follows the harness precedence and treats blank as unset', 
   assert.equal(resolveDshHome({}, home), fallback)
   assert.equal(resolveDshHome({ DSH_HOME: '' }, home), fallback)
   assert.equal(resolveDshHome({ DSH_HOME: '   ' }, home), fallback)
-  // A configured home that does not exist yet is still the home: the harness
-  // creates it on demand, and falling back here would split the registry.
+  // 已配置但尚不存在的 home 仍是该 home：harness 会按需创建，退回默认值会让登记
+  // 文件分裂到另一处。
   assert.equal(resolveDshHome({ DSH_HOME: '/not/created/yet' }, home), path.resolve('/not/created/yet'))
 })
 
@@ -745,9 +894,8 @@ test('resolveDshHome expands a tilde prefix against the OS home', () => {
   assert.equal(resolveDshHome({ DSH_HOME: '~\\elsewhere' }, home), path.resolve(path.join(home, 'elsewhere')))
 })
 
-// The registry lists every instance under one home, so an instance whose home
-// disagrees with the harness lists everything except the host doing the
-// listing. The boot layer's own accessor is that answer whenever it exists.
+// 登记文件按一个 home 列出所有实例，因此 home 与 harness 不一致的实例会列出除自己
+// 之外的所有实例。启动层自己的取值函数就是正确答案，只要它存在。
 test('hostDshHome prefers the host accessor and falls back without one', () => {
   const previous = process.env.DSH_HOME
   process.env.DSH_HOME = '/srv/from-env'
@@ -758,8 +906,7 @@ test('hostDshHome prefers the host accessor and falls back without one', () => {
     assert.equal(hostDshHome(hosted), '/srv/from-host')
     assert.equal(calls, 1)
 
-    // A context that offers no accessor, or offers something that is not one,
-    // never has its value read as a home.
+    // 没有提供取值函数的上下文，或提供的东西不是函数，其值都不会被当作 home 读取。
     for (const ctx of [{}, { get: () => undefined }, { get: () => '/srv/not-a-function' }]) {
       assert.equal(hostDshHome(ctx), path.resolve('/srv/from-env'))
     }

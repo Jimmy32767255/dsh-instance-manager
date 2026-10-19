@@ -21,9 +21,10 @@ The entry point is the menu icon at the bottom-left of the work area, right of t
 - Start a new instance: an empty port takes the first free port of the start range, and a named port already in use is reported instead of moving to another port.
 - Open an instance: a row's `:port` navigates to that instance's UI, and the launch token is read by the host at that moment, so it enters neither the panel state nor the link.
 - Stop one, the current, or all local instances; remote rows are read-only and never part of stop-all.
-- Read-only views per instance: stdout/stderr logs, session summaries, and what the instance is serving.
+- Restart in place: restart a local instance **on the same port** without a manual stop + start.
+- Read-only views per instance: stdout/stderr logs, session summaries (time, folded title or short id, working directory, subagent flag, preset, delegation depth, event count), what the instance is serving, and its diagnostic records (crash black box, self-exit log, mutation trace).
 - Remote instances: with a peer configured, view remote instances, their logs, and their sessions.
-- Agent tools: `instance_list`, `instance_start`, `instance_stop`, `instance_logs`, `instance_sessions`.
+- Agent tools: `instance_list`, `instance_start`, `instance_stop`, `instance_restart`, `instance_logs`, `instance_sessions`.
 - A start from the web panel hands the one-time token URL off to a browser so the new instance can issue its browser cookie; an agent-tool start and a start from the desktop stay headless (`--no-open` is passed on).
 
 ## Install
@@ -82,7 +83,7 @@ Every field has an environment variable of the same name: a deployment without a
 ```powershell
 $env:DSHIM_REFRESH_INTERVAL_MS = '4000'                # live.refreshIntervalMs, decimal digits only
 $env:DSHIM_FLEET_TOKEN = '<long-random-secret>'        # live.fleetToken
-$env:DSHIM_PEERS = 'office@http://192.168.1.20:3080'   # live.peers, same format as the table
+$env:DSHIM_PEERS = 'office@http://192.0.2.10:3080'     # live.peers, same format as the table
 $env:DSHIM_PORT_RANGE = '3080-3129,19387'              # startup.portRange
 $env:DSHIM_FLEET_TOKEN_REF = 'DSHIM_FLEET_TOKEN'       # the name of the variable holding the token, see below
 ```
@@ -113,7 +114,7 @@ The heartbeat file `<home>/run/instances/<port>.json` records this plugin's inst
 
 - `runtime`: `desktop` marks the desktop app's own host process, which every stop operation skips, and `node` marks an ordinary web instance. The criterion is the entry script the host was asked to run, so the environment flag (`ELECTRON_RUN_AS_NODE`) is a diagnostic field only: a web instance started from the desktop carries it too.
 - `launcher`: the host kind that started this instance, `desktop` or `web`, and `parentPid`: the pid of the host that spawned it. A patched host injects both, and they are `null` when unavailable; they are written into the heartbeat file only and appear in no `action=self` reply, agent tool row or panel row.
-- A host that reports no `runtime` is read as `node`.
+- A row this plugin reports without a `runtime` is read as `node`; a row found only by a port probe carries no such field.
 - `name` is the listing process's own executable name, identical on every row of one listing and never the listed instance's identity; the instance identity is read from `runtime`, `pid` and `version`.
 
 ## Security
@@ -127,20 +128,46 @@ The heartbeat file `<home>/run/instances/<port>.json` records this plugin's inst
 - The event stream and every JSON reply carry `cache-control: no-store`.
 - An unexpected failure answers a fixed `code` only, and the exception text goes to the host log rather than the response.
 - The fleet token has no action-level scopes: a holder can start or stop local instances and read session information, so grant it only to trusted devices.
-- On DSH 0.1.0-rc.7 and later, browser APIs and event streams reuse the Connection signed cookie, admission is decided by Connection's Host/Origin check and that cookie, and this plugin's own guard does not take part.
+- On a host that mounts Connection, browser APIs and event streams reuse its signed cookie; admission is decided by Connection's Host/Origin check and that cookie, and this plugin's own guard does not take part.
 - Instance confirmation and forwarding use strict loopback probe actions only, and SSE is local-only.
 - Every accepted mutation writes one line to `<home>/launcher/logs/dshim-requests.log`, recording the peer address, the admission path, the request's `Host`/`Origin`/`Referer`/`User-Agent`, the target port, and the result.
 - `dshim-selfexit.log` records only the trigger; cookies and Authorization are never read and never written.
 
+## Diagnostic records
+
+When an instance disappears silently, the drawer's Diagnostics tab lists that instance's three records, the last 200 lines of each:
+
+- Crash black box `dshim-crash.log`: one header line plus the stack, written on a process crash or an unhandled promise rejection.
+- Self-exit log `dshim-selfexit.log`: one line per route that ends this process, saying whether it crashed or was asked to leave.
+- Mutation trace `dshim-requests.log`: one line per accepted mutation, with the peer address, the admission path, `Host`/`Origin`/`Referer`/`User-Agent`, the target port, and the result.
+
+- All three files are shared by every local instance, so crash and self-exit records are scoped by that instance's pid and the mutation trace by its port.
+- The diagnostics surface accepts local loopback requests only and is never forwarded over fleet: neither a peer holding a valid fleet bearer nor a trusted LAN browser can read it. Remote rows therefore carry no such tab.
+- Filtering a crash record keeps the whole record — header and stack — so a stack never lands under another instance's name.
+- These files are never pruned by anything, and the diagnostics surface only reads them: nothing deletes or rewrites them.
+
+## Session fields
+
+Every session summary row is a pure scalar projection; the host's live session objects are never serialized wholesale.
+
+- `title`: the latest folded session title, from the host's optional `sessionTitle` service. The field is absent when the host has no such service, or when the session has no eligible input yet, and the panel then falls back to the 8-character short id.
+- `agentPreset`, `parentSession`, `delegationDepth`: lineage from the session header, each omitted when absent. Delegation depth appears only on a genuinely delegated child; a top-level session carries none.
+- `cwd`, `subagent`, `events`: working directory, subagent flag and event count.
+- All of these are optional. On a mixed-version fleet an older instance's reply carries none of them, and this plugin's output schema is closed, so the projection adopts each by type and omits what is missing rather than writing `null`.
+
+## Restart in place
+
+An instance row's Restart button and the `instance_restart` agent tool restart a local instance **on the same port**, replacing a manual stop + start. The steps are fixed: forward the stop (the target exits gracefully through its own `appExit`, so sessions persist) → poll until the port is genuinely released → launch on that port → wait for it to answer `action=self`.
+
+- **The port is empty between the stop and the start.** A process that grabs it inside that window fails the restart with `port_in_use`; a port still taken after 15 seconds answers `port_still_in_use`. Neither case starts anywhere else — the point is a restart on the original port, and a different port is a different instance.
+- The current instance is never restarted: the process serving the panel leaves with the restart, and the browser would only see a failed click. Restart your local dsh instead.
+- The desktop host is never restarted, for the same reasons as stopping it.
+- Remote rows are not restartable.
+- A panel-triggered restart hands the launch token off to the browser, so the fresh instance opens directly; an agent-tool restart stays headless (`--no-open` is passed on).
+
 ## Development
 
-Run before committing:
-
-```sh
-npm test
-npm run docs:check
-npm pack --dry-run
-```
+Engineering boundaries and pre-commit checks live in [AGENTS.md](https://github.com/xswt442-cmd/dsh-instance-manager/blob/main/AGENTS.md); the release runbook is [docs/RELEASING.md](https://github.com/xswt442-cmd/dsh-instance-manager/blob/main/docs/RELEASING.md).
 
 ## License
 

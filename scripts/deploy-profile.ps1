@@ -1,22 +1,18 @@
-# Deploy dsh-instance-manager INTO the local dsh web profile as a REAL
-# directory snapshot (replacing any dev symlink).
+# 把 dsh-instance-manager 以真实目录快照的形式部署到本机 dsh web profile
+# （替换可能存在的开发用符号链接）。
 #
-# This is a convenience for whoever develops the plugin on one particular
-# machine: it is not an installation path the repository promises, and the README
-# deliberately does not point at it. Nothing in the package depends on it, and
-# its profile layout assumptions are the running host's, not the plugin's.
+# 这是单机开发时的便利脚本，不是仓库承诺的安装方式，README 不指向它。包本身不依赖
+# 它，其中的 profile 目录结构属于运行中的宿主，不属于本插件。
 #
-# Why: a symlinked profile mount makes every working-tree edit a LIVE bundle
-# change — cordis-plugin-hmr reloads running instances on each save, and
-# multi-file refactors have inconsistent intermediate states that can take
-# the whole instance down. Snapshot deployments decouple "me typing" from
-# "fleet running": edit freely, deploy deliberately, restart instances once.
+# 采用快照而不是符号链接：链接式挂载会让每次工作区编辑都成为线上 bundle 变更——
+# cordis-plugin-hmr 会在每次保存时重载运行中的实例，多文件重构的中间状态可能让整个
+# 实例退出。快照把“正在编辑”与“正在运行”分开：随时编辑，有意部署，然后重启实例。
 #
-# Usage:
-#   powershell -File scripts\deploy-profile.ps1              # default home
-#   powershell -File scripts\deploy-profile.ps1 -DshHome X   # custom home
+# 用法：
+#   powershell -File scripts\deploy-profile.ps1              # 使用默认 home
+#   powershell -File scripts\deploy-profile.ps1 -DshHome X   # 指定 home
 #
-# After deploying, restart your dsh instances so they load the snapshot.
+# 部署后重启 dsh 实例，让它们加载这份快照。
 
 param([string]$DshHome = "$env:USERPROFILE\.dsh")
 
@@ -28,13 +24,11 @@ if (-not (Test-Path (Join-Path $repoRoot 'lib\index.js'))) {
   throw "run this script from the dsh-instance-manager checkout (missing lib\index.js under $repoRoot)"
 }
 
-# Link detection must use the ReparsePoint attribute: Get-Item on a directory
-# symlink can resolve through to the TARGET, and PS5.1's
-# `Remove-Item -Recurse` FOLLOWS directory links (it would delete the working
-# tree through the link). `cmd /c rmdir` removes the reparse point only.
-# Removal can race a running instance's file watcher: a deleted-but-still-
-# referenced directory enters Windows "delete pending" and recreating it
-# fails with access denied. Retry until the name is really gone.
+# 链接检测必须使用 ReparsePoint 属性：对目录符号链接调用 Get-Item 可能解析到目标，
+# 而 PS5.1 的 `Remove-Item -Recurse` 会跟随目录链接（会通过链接删除工作区）。使用
+# `cmd /c rmdir` 只删除重解析点。
+# 删除操作可能与运行中实例的文件监视器竞争：已删除但仍被引用的目录会进入 Windows 的
+# “delete pending”状态，重建时返回拒绝访问。因此重试到名字真正消失。
 for ($attempt = 0; $attempt -lt 12; $attempt++) {
   if (-not (Test-Path $dst)) { break }
   $dstItem = Get-Item $dst -Force -ErrorAction SilentlyContinue
@@ -55,9 +49,8 @@ foreach ($name in 'lib', 'cordis.patch.yml', 'package.json', 'README.md', 'READM
   Copy-Item (Join-Path $repoRoot $name) $dst -Recurse -Force
 }
 
-# Read as UTF-8 explicitly: package.json embeds Chinese descriptions, and
-# Get-Content defaults to the system ANSI codepage (GBK on zh-CN), which
-# corrupts UTF-8 and makes ConvertFrom-Json throw.
+# 显式按 UTF-8 读取：package.json 含中文描述，而 Get-Content 默认使用系统 ANSI 代码页
+# （zh-CN 上是 GBK），会破坏 UTF-8 并让 ConvertFrom-Json 抛出。
 $version = (Get-Content (Join-Path $dst 'package.json') -Raw -Encoding UTF8 | ConvertFrom-Json).version
 Write-Host "deployed v$version -> $dst"
 Write-Host 'next: restart your dsh instances (panel「停止当前」then relaunch),'

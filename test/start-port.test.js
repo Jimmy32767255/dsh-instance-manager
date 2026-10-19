@@ -1,11 +1,7 @@
-// Auto-port selection regressions.
+// 自动端口选择。
 //
-// The bug these cover, observed live: a start died on port P with EADDRINUSE
-// (the port read as free while an earlier attempt's bind had not settled), the
-// retry re-picked P, and that child died the same way. One failed attempt became
-// a loop over the same port, each child writing a diagnostic report. Two things
-// had to change: the picker must skip the port the attempt died on, and a pick
-// must be confirmed by a real bind rather than by "nothing answered a connect".
+// 选取器必须跳过上一次尝试失败的端口；候选端口要靠真实绑定确认，而不是只确认没有
+// 连接应答——失败子进程的监听器可能尚未结算，扫描会短暂把该端口报告为空闲。
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { pickStartPort, retryableStart, startOnceOrRetry } from '../lib/shared.js'
@@ -39,11 +35,10 @@ test('only the excluded port being free still answers 0 rather than reusing it',
   assert.equal(port, 0, 're-picking the port that just failed is the loop this guards')
 })
 
-// ---- how many times START may spawn --------------------------------------
+// ---- START 可以派生几次 ----------------------------------------------------
 //
-// The retry protects one case (a child that DIED on an auto-picked port) and
-// must never grow into the two failures that are worse than the one it fixes:
-// spawning on a port the caller never named, and double-spawning a slow boot.
+// 重试只保护一种情况（子进程在自动选取的端口上退出），绝不能演变成比它修复的问题更
+// 严重的两种失败：在调用方没指定的端口上启动，以及重复派生一个启动较慢的实例。
 const launches = (results) => {
   const seen = []
   const launch = async (options) => {
@@ -89,5 +84,6 @@ test('a second failure reports both attempts', async () => {
   assert.equal(seen.length, 2)
   assert.equal(r.ok, false)
   assert.match(r.error, /first died/)
+  assert.match(r.error, /second died/, '第二次尝试的原因也要上报')
   assert.match(r.error, /重试仍失败/)
 })

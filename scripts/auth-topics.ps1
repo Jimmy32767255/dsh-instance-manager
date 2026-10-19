@@ -1,9 +1,7 @@
 param(
-  # The repository the topics are written to, as `owner/name`. There is
-  # deliberately no default and no hard-coded owner in this file: who owns the
-  # repository is a fact about a specific deployment, and a tracked script that
-  # states it silently points every other clone at somebody else's repository.
-  # Pass it explicitly — `git remote get-url origin` names it.
+  # 写入 topics 的仓库，格式为 `owner/name`。这里刻意没有默认值，也没有硬编码的
+  # owner：仓库归属是某次部署的事实，受版本控制的脚本若把它写死，会让其他克隆静默指向
+  # 别人的仓库。请显式传入——`git remote get-url origin` 会给出它。
   [Parameter(Mandatory = $true)]
   [string]$Repo
 )
