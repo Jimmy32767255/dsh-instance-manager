@@ -82,7 +82,7 @@ dsh plugin --profile web add github:xswt442-cmd/dsh-instance-manager
 ```powershell
 $env:DSHIM_REFRESH_INTERVAL_MS = '4000'                # live.refreshIntervalMs，仅接受十进制整数
 $env:DSHIM_FLEET_TOKEN = '<long-random-secret>'        # live.fleetToken
-$env:DSHIM_PEERS = 'office@http://192.168.1.20:3080'   # live.peers，格式同上表
+$env:DSHIM_PEERS = 'office@http://192.0.2.10:3080'     # live.peers，格式同上表
 $env:DSHIM_PORT_RANGE = '3080-3129,19387'              # startup.portRange
 $env:DSHIM_FLEET_TOKEN_REF = 'DSHIM_FLEET_TOKEN'       # 存放 token 的环境变量名，见下节
 ```
@@ -113,7 +113,7 @@ $env:DSHIM_FLEET_TOKEN_REF = 'DSHIM_FLEET_TOKEN'       # 存放 token 的环境�
 
 - `runtime`：`desktop` 表示桌面应用自己的宿主进程，任何停止操作都跳过它；`node` 表示普通 web 实例。判据是宿主被要求运行的入口脚本，因此环境变量（`ELECTRON_RUN_AS_NODE`）只作为诊断字段：桌面端启动的 web 实例同样带该变量。
 - `launcher`：启动该实例的宿主类型，`desktop` 或 `web`；`parentPid`：发起启动的宿主 pid。两者由打过补丁的宿主注入，取不到时为 `null`，只写进心跳文件，不出现在 `action=self` 应答、agent 工具行与面板里。
-- 宿主不回报 `runtime` 时，其行按 `node` 处理。
+- 本插件回报的行若不带 `runtime`，按 `node` 处理；只能靠端口探测发现的行不带该字段。
 - `name` 是列表进程自己的可执行文件名，同一份列表里每行相同，不是被列实例的身份；实例身份由 `runtime`、`pid` 与 `version` 区分。
 
 ## 安全
@@ -127,20 +127,14 @@ $env:DSHIM_FLEET_TOKEN_REF = 'DSHIM_FLEET_TOKEN'       # 存放 token 的环境�
 - 事件流与所有 JSON 应答携带 `cache-control: no-store`。
 - 意外失败的 500 仅返回固定 `code`，异常原文只写入宿主日志。
 - Fleet token 没有操作级权限划分，持有者可启动或停止本机实例并读取会话信息，应仅授予可信设备。
-- DSH 0.1.0-rc.7 及之后，浏览器 API 与事件流复用 Connection 的签名 cookie，准入由 Connection 的 Host/Origin 校验与 cookie 判定，插件自带守卫不参与。
+- 宿主挂载了 Connection 时，浏览器 API 与事件流复用其签名 cookie；准入由 Connection 的 Host/Origin 校验与 cookie 判定，插件自带守卫不参与。
 - 内部实例确认与转发只走严格 loopback 探测，SSE 仅向本机开放。
 - 每个被接受的写操作在 `<home>/launcher/logs/dshim-requests.log` 记录一行：对端地址、准入路径、请求携带的 `Host`/`Origin`/`Referer`/`User-Agent`、目标端口与结果。
 - `dshim-selfexit.log` 只记录触发者；Cookie 与 Authorization 既不读取也不写入。
 
 ## 开发
 
-提交前运行：
-
-```sh
-npm test
-npm run docs:check
-npm pack --dry-run
-```
+工程边界与提交前检查见 [AGENTS.md](https://github.com/xswt442-cmd/dsh-instance-manager/blob/main/AGENTS.md)；发布流程见 [docs/RELEASING.md](https://github.com/xswt442-cmd/dsh-instance-manager/blob/main/docs/RELEASING.md)。
 
 ## License
 

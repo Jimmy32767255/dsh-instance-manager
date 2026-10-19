@@ -82,7 +82,7 @@ Every field has an environment variable of the same name: a deployment without a
 ```powershell
 $env:DSHIM_REFRESH_INTERVAL_MS = '4000'                # live.refreshIntervalMs, decimal digits only
 $env:DSHIM_FLEET_TOKEN = '<long-random-secret>'        # live.fleetToken
-$env:DSHIM_PEERS = 'office@http://192.168.1.20:3080'   # live.peers, same format as the table
+$env:DSHIM_PEERS = 'office@http://192.0.2.10:3080'     # live.peers, same format as the table
 $env:DSHIM_PORT_RANGE = '3080-3129,19387'              # startup.portRange
 $env:DSHIM_FLEET_TOKEN_REF = 'DSHIM_FLEET_TOKEN'       # the name of the variable holding the token, see below
 ```
@@ -113,7 +113,7 @@ The heartbeat file `<home>/run/instances/<port>.json` records this plugin's inst
 
 - `runtime`: `desktop` marks the desktop app's own host process, which every stop operation skips, and `node` marks an ordinary web instance. The criterion is the entry script the host was asked to run, so the environment flag (`ELECTRON_RUN_AS_NODE`) is a diagnostic field only: a web instance started from the desktop carries it too.
 - `launcher`: the host kind that started this instance, `desktop` or `web`, and `parentPid`: the pid of the host that spawned it. A patched host injects both, and they are `null` when unavailable; they are written into the heartbeat file only and appear in no `action=self` reply, agent tool row or panel row.
-- A host that reports no `runtime` is read as `node`.
+- A row this plugin reports without a `runtime` is read as `node`; a row found only by a port probe carries no such field.
 - `name` is the listing process's own executable name, identical on every row of one listing and never the listed instance's identity; the instance identity is read from `runtime`, `pid` and `version`.
 
 ## Security
@@ -127,20 +127,14 @@ The heartbeat file `<home>/run/instances/<port>.json` records this plugin's inst
 - The event stream and every JSON reply carry `cache-control: no-store`.
 - An unexpected failure answers a fixed `code` only, and the exception text goes to the host log rather than the response.
 - The fleet token has no action-level scopes: a holder can start or stop local instances and read session information, so grant it only to trusted devices.
-- On DSH 0.1.0-rc.7 and later, browser APIs and event streams reuse the Connection signed cookie, admission is decided by Connection's Host/Origin check and that cookie, and this plugin's own guard does not take part.
+- On a host that mounts Connection, browser APIs and event streams reuse its signed cookie; admission is decided by Connection's Host/Origin check and that cookie, and this plugin's own guard does not take part.
 - Instance confirmation and forwarding use strict loopback probe actions only, and SSE is local-only.
 - Every accepted mutation writes one line to `<home>/launcher/logs/dshim-requests.log`, recording the peer address, the admission path, the request's `Host`/`Origin`/`Referer`/`User-Agent`, the target port, and the result.
 - `dshim-selfexit.log` records only the trigger; cookies and Authorization are never read and never written.
 
 ## Development
 
-Run before committing:
-
-```sh
-npm test
-npm run docs:check
-npm pack --dry-run
-```
+Engineering boundaries and pre-commit checks live in [AGENTS.md](https://github.com/xswt442-cmd/dsh-instance-manager/blob/main/AGENTS.md); the release runbook is [docs/RELEASING.md](https://github.com/xswt442-cmd/dsh-instance-manager/blob/main/docs/RELEASING.md).
 
 ## License
 
