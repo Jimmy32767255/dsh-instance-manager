@@ -313,3 +313,79 @@ test('instance_sessions reports a failure reply as not-ok without inventing rows
   assert.equal(v.ok, false, '非布尔但为假值的应答也必须读成 false')
   assert.match(def.output.render({}, v)[0].text, /failed/)
 })
+
+// 标题与谱系是跨版本可选的：新版本的本机实例返回它们，旧版本的本机实例与旧版本的
+// 远端实例都不返回。投影因此逐个按类型采纳，缺失即省略——`additionalProperties: false`
+// 之下写入 null 与编造值同等危险。
+test('instance_sessions keeps the title and lineage a newer instance reports', async () => {
+  const { api } = makeApi({
+    sessions: async () => ({
+      ok: true,
+      port: 3080,
+      total: 1,
+      sessions: [{
+        id: 'abcdef0123456789',
+        createdAt: 100,
+        title: '修复登录',
+        cwd: '/w',
+        subagent: true,
+        agentPreset: 'reviewer',
+        parentSession: 'aaa',
+        delegationDepth: 2,
+        events: 12
+      }]
+    })
+  })
+  const def = byName(buildAgentTools(identity, api)).instance_sessions
+  const v = await def.execute({ port: 3080 })
+  assert.deepEqual(v.sessions[0], {
+    id: 'abcdef0123456789',
+    createdAt: 100,
+    title: '修复登录',
+    cwd: '/w',
+    subagent: true,
+    agentPreset: 'reviewer',
+    parentSession: 'aaa',
+    delegationDepth: 2,
+    events: 12
+  })
+  const rendered = def.output.render({}, v)[0].text
+  assert.match(rendered, /修复登录/, '有标题时用它替代没有辨识度的短 id')
+  assert.match(rendered, /reviewer/)
+  assert.match(rendered, /depth 2/)
+})
+
+test('instance_sessions omits the optional fields a legacy reply lacks', async () => {
+  const declaration = byName(buildAgentTools(identity, makeApi().api)).instance_sessions
+  const rowSchema = declaration.output.schema.properties.sessions.items
+  assert.equal(rowSchema.additionalProperties, false, '会话行同样是封闭的')
+  const declared = Object.keys(rowSchema.properties).sort()
+  assert.ok(declared.includes('title') && declared.includes('agentPreset') &&
+    declared.includes('parentSession') && declared.includes('delegationDepth'),
+    '新字段必须一并声明，否则宿主返回它们时会被 additionalProperties:false 拒绝')
+
+  // 旧版本实例的应答：一个 id、一个 createdAt，此外什么都没有。
+  const { api } = makeApi({
+    sessions: async () => ({ ok: true, port: 3080, total: 1, sessions: [{ id: 'legacy01', createdAt: 100 }] })
+  })
+  const def = byName(buildAgentTools(identity, api)).instance_sessions
+  const v = await def.execute({ port: 3080 })
+  assert.deepEqual(v.sessions, [{ id: 'legacy01', createdAt: 100 }],
+    '缺失即省略，不写 null 或空串')
+  assert.match(def.output.render({}, v)[0].text, /legacy01/)
+})
+
+test('instance_sessions drops lineage values it cannot promise', async () => {
+  const { api } = makeApi({
+    sessions: async () => ({
+      ok: true,
+      sessions: [{
+        id: 'a', createdAt: 1,
+        title: '', agentPreset: null, parentSession: 42, delegationDepth: 0
+      }]
+    })
+  })
+  const def = byName(buildAgentTools(identity, api)).instance_sessions
+  assert.deepEqual((await def.execute({ port: 3080 })).sessions, [{ id: 'a', createdAt: 1 }],
+    '空串、null、错类型与深度 0 都不进入摘要')
+})

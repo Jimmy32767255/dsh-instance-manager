@@ -22,7 +22,7 @@ The entry point is the menu icon at the bottom-left of the work area, right of t
 - Open an instance: a row's `:port` navigates to that instance's UI, and the launch token is read by the host at that moment, so it enters neither the panel state nor the link.
 - Stop one, the current, or all local instances; remote rows are read-only and never part of stop-all.
 - Restart in place: restart a local instance **on the same port** without a manual stop + start.
-- Read-only views per instance: stdout/stderr logs, session summaries, what the instance is serving, and its diagnostic records (crash black box, self-exit log, mutation trace).
+- Read-only views per instance: stdout/stderr logs, session summaries (time, folded title or short id, working directory, subagent flag, preset, delegation depth, event count), what the instance is serving, and its diagnostic records (crash black box, self-exit log, mutation trace).
 - Remote instances: with a peer configured, view remote instances, their logs, and their sessions.
 - Agent tools: `instance_list`, `instance_start`, `instance_stop`, `instance_restart`, `instance_logs`, `instance_sessions`.
 - A start from the web panel hands the one-time token URL off to a browser so the new instance can issue its browser cookie; an agent-tool start and a start from the desktop stay headless (`--no-open` is passed on).
@@ -145,6 +145,15 @@ When an instance disappears silently, the drawer's Diagnostics tab lists that in
 - The diagnostics surface accepts local loopback requests only and is never forwarded over fleet: neither a peer holding a valid fleet bearer nor a trusted LAN browser can read it. Remote rows therefore carry no such tab.
 - Filtering a crash record keeps the whole record — header and stack — so a stack never lands under another instance's name.
 - These files are never pruned by anything, and the diagnostics surface only reads them: nothing deletes or rewrites them.
+
+## Session fields
+
+Every session summary row is a pure scalar projection; the host's live session objects are never serialized wholesale.
+
+- `title`: the latest folded session title, from the host's optional `sessionTitle` service. The field is absent when the host has no such service, or when the session has no eligible input yet, and the panel then falls back to the 8-character short id.
+- `agentPreset`, `parentSession`, `delegationDepth`: lineage from the session header, each omitted when absent. Delegation depth appears only on a genuinely delegated child; a top-level session carries none.
+- `cwd`, `subagent`, `events`: working directory, subagent flag and event count.
+- All of these are optional. On a mixed-version fleet an older instance's reply carries none of them, and this plugin's output schema is closed, so the projection adopts each by type and omits what is missing rather than writing `null`.
 
 ## Restart in place
 

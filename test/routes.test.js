@@ -20,7 +20,7 @@ const LINK_PATH = '/dsh-instance-manager/link'
 
 // `config` 是 profile 条目作为第二个参数交给 apply() 的内容（0.1.7-rc.1 及以后）；
 // 保持 undefined 可复现更早的版本，那里这些值只有设置服务一个来源。
-const mount = ({ upgradeSupport = true, connection, config, port, tools, hostHome } = {}) => {
+const mount = ({ upgradeSupport = true, connection, config, port, tools, hostHome, sessions, sessionTitle } = {}) => {
   const routes = []
   const upgrades = []
   const getCalls = []
@@ -49,6 +49,9 @@ const mount = ({ upgradeSupport = true, connection, config, port, tools, hostHom
       // 仅在需要时提供：没有它时 agent 工具行保持未挂载，下面固定的服务查找次数
       // 维持原有形状。
       if (name === 'tools') return tools
+      // 会话摘要的两个可选服务：没有它们时宿主走降级路径，正是会话增补要守住的那条。
+      if (name === 'sessions') return sessions
+      if (name === 'sessionTitle') return sessionTitle
       // 只有需要启动层 home 取值函数的挂载才提供它；没有时插件退回
       // resolveDshHome(process.env)。
       if (name === 'dshHomePath') return hostHome ? () => hostHome : undefined
@@ -311,8 +314,8 @@ const callApi = async (query, method = 'GET') => {
 
 // 完全控制请求：伪造非回环 socket 对端、设置 bearer，或彻底去掉 socket，以驱动信任
 // 边界的各道关卡。
-const callApiFull = async ({ query, method = 'GET', host = '127.0.0.1', remoteAddress, headers = {}, connection, config, port }) => {
-  const { routes, dispose } = mount({ connection, config, port })
+const callApiFull = async ({ query, method = 'GET', host = '127.0.0.1', remoteAddress, headers = {}, connection, config, port, sessions, sessionTitle }) => {
+  const { routes, dispose } = mount({ connection, config, port, sessions, sessionTitle })
   try {
     const route = routes.find((r) => r.path === API_PATH)
     let status = 0
@@ -990,6 +993,80 @@ test('action=diagnostics is refused a cross-site request', async () => {
   })
   assert.equal(r.status, 403)
   assert.equal(r.json.code, 'bad_origin')
+})
+
+// ---- 会话摘要的标题与谱系 -----------------------------------------------
+//
+// 标题服务是可选的，而且刻意没有写进 `inject`：写进去会让没有该服务的组合停在
+// PENDING，宿主启动审计把那算作失败。下面的用例因此用「ctx.get 返回 undefined」
+// 驱动降级路径，而不是断言 inject 的内容。
+
+const LIVE_SESSION = {
+  id: 'abcdef0123456789',
+  header: { createdAt: 100, cwd: '/work/alpha', origin: 'subagent', agentPreset: 'reviewer', parentSession: 'aaa', delegationDepth: 1 },
+  seq: 12
+}
+
+test('action=sessions carries the folded title when the optional service provides one', async () => {
+  const r = await callApiFull({
+    query: 'action=sessions',
+    remoteAddress: '127.0.0.1',
+    port: 3080,
+    sessions: { list: () => [LIVE_SESSION] },
+    sessionTitle: { get: () => ({ title: '修复登录' }) }
+  })
+  assert.equal(r.json.ok, true)
+  assert.deepEqual(r.json.sessions, [{
+    id: 'abcdef0123456789',
+    createdAt: 100,
+    title: '修复登录',
+    cwd: '/work/alpha',
+    subagent: true,
+    agentPreset: 'reviewer',
+    parentSession: 'aaa',
+    delegationDepth: 1,
+    events: 12
+  }])
+})
+
+// 跨版本 fleet 的前提：服务缺失时摘要必须与增补之前逐字节相同，混入 title:null 会让
+// 对端输出 schema（additionalProperties: false）之外的编造值变成 ToolOutputError。
+test('action=sessions without the title service answers exactly the pre-enrichment payload', async () => {
+  const plain = {
+    id: 'abcdef0123456789',
+    header: { createdAt: 100, cwd: '/work/alpha', origin: 'subagent' },
+    seq: 12
+  }
+  const before = JSON.stringify({
+    ok: true,
+    port: 3080,
+    total: 1,
+    sessions: [{
+      id: 'abcdef0123456789',
+      createdAt: 100,
+      cwd: '/work/alpha',
+      subagent: true,
+      events: 12
+    }]
+  })
+  const missing = await callApiFull({
+    query: 'action=sessions',
+    remoteAddress: '127.0.0.1',
+    port: 3080,
+    sessions: { list: () => [plain] }
+  })
+  assert.equal(JSON.stringify(missing.json), before, '服务缺失时逐字节相同')
+
+  // 服务在但会话还没有合格标题时同样不写该键——`get` 返回 undefined 是真实存在的状态
+  // （用户还没有发出第一条消息）。
+  const untitled = await callApiFull({
+    query: 'action=sessions',
+    remoteAddress: '127.0.0.1',
+    port: 3080,
+    sessions: { list: () => [plain] },
+    sessionTitle: { get: () => undefined }
+  })
+  assert.equal(JSON.stringify(untitled.json), before, '没有标题时同样省略该键')
 })
 
 // 客户端会把缺失的 `peer` 字符串化成字面量 "undefined"，它到达宿主时是一个格式合法的

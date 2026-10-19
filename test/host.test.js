@@ -538,6 +538,77 @@ test('summarizeSessions caps at N newest rows', () => {
   assert.equal(rows[0].id, 's29', 'cap keeps the NEWEST rows')
 })
 
+// ---- 会话摘要的标题与谱系 -------------------------------------------------
+//
+// 标题与谱系都来自可选服务或可选的 header 字段，因此两条性质必须同时成立：有值时
+// 出现在摘要里；没有值时摘要与它不存在之前逐字节相同——后者是跨版本 fleet 的前提，
+// 旧实例的应答会原样穿过本插件。
+
+test('summarizeSessions adds the title when the host provides one', () => {
+  const rows = summarizeSessions(
+    [{ id: 'a', header: { createdAt: 1 } }, { id: 'b', header: { createdAt: 2 } }],
+    20,
+    { titleOf: (s) => (s.id === 'a' ? '修复登录' : undefined) }
+  )
+  assert.equal(rows[1].title, '修复登录')
+  assert.equal('title' in rows[0], false, '没有合格输入的会话省略该键，而不是写 null')
+})
+
+test('summarizeSessions adds lineage from the session header', () => {
+  const rows = summarizeSessions([
+    {
+      id: 'child',
+      header: {
+        createdAt: 30,
+        origin: 'subagent',
+        agentPreset: 'reviewer',
+        parentSession: 'abcdef0123456789',
+        delegationDepth: 2
+      }
+    },
+    { id: 'top', header: { createdAt: 20, agentPreset: '', parentSession: '', delegationDepth: 0 } }
+  ])
+  assert.deepEqual(rows[0], {
+    id: 'child', createdAt: 30, subagent: true, agentPreset: 'reviewer',
+    parentSession: 'abcdef0123456789', delegationDepth: 2
+  })
+  assert.deepEqual(rows[1], { id: 'top', createdAt: 20 },
+    '顶层会话的深度 0、空预设与空父会话都省略：深度 1 与"没有父会话"对读者是两件事')
+})
+
+// 跨版本 fleet 的前提：缺少标题服务时，摘要必须与增补之前逐字节相同，而不是多出
+// 一个 null 或空串——本插件的输出 schema 声明 additionalProperties: false，混入
+// 编造的键会让对端整个工具结果校验失败。
+test('summarizeSessions without a title service is byte-identical to the pre-enrichment shape', () => {
+  const sessions = [
+    { id: 'aaa', header: { createdAt: 100, cwd: '/work/alpha', origin: 'subagent' }, seq: 7 },
+    { id: 'bbb', header: { createdAt: 200 } },
+    { id: 'ccc', header: { createdAt: 150, cwd: '' }, seq: 0 }
+  ]
+  // 增补之前那一份投影的确定形式。
+  const before = [
+    { id: 'bbb', createdAt: 200 },
+    { id: 'ccc', createdAt: 150, events: 0 },
+    { id: 'aaa', createdAt: 100, cwd: '/work/alpha', subagent: true, events: 7 }
+  ]
+  assert.equal(JSON.stringify(summarizeSessions(sessions)), JSON.stringify(before),
+    '省略 titleOf 时，摘要与增补之前逐字节相同')
+  // 取值函数存在但没有服务（本插件的降级路径）同样如此。
+  assert.equal(JSON.stringify(summarizeSessions(sessions, 20, { titleOf: () => undefined })), JSON.stringify(before))
+  // 抛出也不能让摘要变形：服务可以在会话释放后失效。
+  assert.equal(
+    JSON.stringify(summarizeSessions(sessions, 20, { titleOf: () => { throw new Error('disposed') } })),
+    JSON.stringify(before)
+  )
+})
+
+test('summarizeSessions ignores a non-string title from the resolver', () => {
+  const rows = summarizeSessions([{ id: 'a', header: { createdAt: 1 } }], 20, {
+    titleOf: () => null
+  })
+  assert.deepEqual(rows, [{ id: 'a', createdAt: 1 }])
+})
+
 test('awaitPortFree waits for the listener to settle and never returns a busy port', async () => {
   // 时钟由测试注入：结论必须是「端口确实空出来了」，而不是「等够了这么久」。
   let probes = 0

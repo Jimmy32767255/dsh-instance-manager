@@ -442,6 +442,52 @@ test('the restart button arms before restarting, on its own port', async () => {
   assert.match(restartCalls[0].url, /port=3080/, '重启的是这一行的原端口')
 })
 
+test('the session row shows the folded title and lineage instead of a bare short id', async () => {
+  const withSession = (sessions) => {
+    const panel = mountPanel({
+      fetchImpl: async (url) => {
+        const query = String(url).split('?')[1] || ''
+        if (/action=list/.test(query)) return { json: async () => LIST_ONE }
+        if (/action=sessions/.test(query)) return { json: async () => ({ ok: true, port: 3080, total: sessions.length, sessions }) }
+        return { json: async () => ({ ok: true }) }
+      }
+    })
+    return panel
+  }
+
+  const panel = withSession([
+    {
+      id: 'abcdef0123456789',
+      createdAt: 1,
+      title: 'fix login redirect',
+      cwd: '/w/myproject',
+      agentPreset: 'reviewer',
+      parentSession: 'aaa',
+      delegationDepth: 2,
+      events: 47
+    }
+  ])
+  await panel.flush()
+  const row = findAll(panel.renderTree(), (n) => n.type === 'div' && /dshim-row/.test(n.props.className))[0]
+  row.props.onClick()
+  await panel.flush()
+  const text = textOf(panel.renderTree())
+  assert.match(text, /fix login redirect/, '折叠标题替代没有辨识度的短 id')
+  assert.doesNotMatch(text, /abcdef01/, '有标题时不再显示短 id')
+  assert.match(text, /myproject/)
+  assert.match(text, /\[reviewer\]/, '预设说明这个会话由哪个预设组装')
+  assert.match(text, /↧2/, '委派深度把它与顶层会话区分开')
+  assert.match(text, /47 ev/)
+
+  // 旧实例的应答只有 id：短 id 必须原样保留，而不是渲染成空。
+  const legacy = withSession([{ id: 'abcdef0123456789', createdAt: 1, cwd: '/w/myproject', events: 47 }])
+  await legacy.flush()
+  const legacyRow = findAll(legacy.renderTree(), (n) => n.type === 'div' && /dshim-row/.test(n.props.className))[0]
+  legacyRow.props.onClick()
+  await legacy.flush()
+  assert.match(textOf(legacy.renderTree()), /abcdef01/)
+})
+
 test('the restart button refuses the current instance, and says why', async () => {
   const current = {
     ok: true,
