@@ -84,5 +84,6 @@ test('a second failure reports both attempts', async () => {
   assert.equal(seen.length, 2)
   assert.equal(r.ok, false)
   assert.match(r.error, /first died/)
+  assert.match(r.error, /second died/, '第二次尝试的原因也要上报')
   assert.match(r.error, /重试仍失败/)
 })
