@@ -16,7 +16,6 @@
 - Code comments explain relevant current constraints rather than discarded implementations or troubleshooting history. Use Mermaid for diagrams when a diagram is necessary.
 - Keep user-facing Simplified Chinese and English documents consistent where the repository maintains both.
 - Treat `CHANGELOG.md` as the source for version-change text. Generate GitHub Release notes from the tagged version section rather than maintaining a separate copy.
-- PR descriptions must describe completed changes and checks actually passed in matching Simplified Chinese and English sections. Place separate future work in Issues.
 - Use relative links to tracked documentation inside this repository. Do not make public documentation depend on a developer's private files or another local checkout.
 - Keep local experiments and Agent handoffs in an ignored directory such as `testplace/`, never in a public commit. Put directory-specific rules in additional local-scope `AGENTS.md` files only when useful.
 
