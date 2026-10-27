@@ -534,21 +534,38 @@ exit 0
 // 假的 dsh 只实现 web 面板探测用到的最小面：`--port` 上监听、对任意 GET 回自身报告、
 // 被 stop-self 停止；启动时把 token 打到 stdout（插件的 token 读取依赖这一行），并留下
 // pid 文件供测试善后。
+//
+// token 按进程生成，并且根路径上的 `?token=` 与真实实例一样判真伪：正确的换成 cookie
+// 后 303 到干净的 `/`，其余（包括同一端口上上一代进程的那枚）401。交接因此不能只凭
+// “日志里最后一条 token 行”成立。
 const DSH_STUB = `#!/usr/bin/env node
 const fs = require('fs')
 const http = require('http')
 const path = require('path')
 const at = process.argv.indexOf('--port')
 const port = Number(process.argv[at + 1])
+const token = 'TOKEN' + process.pid
 const server = http.createServer((req, res) => {
+  const url = String(req.url || '')
+  const asked = /^\\/\\?token=([^&]+)$/.exec(url)
+  if (asked) {
+    if (asked[1] === token) {
+      res.writeHead(303, { location: '/', 'set-cookie': 'dsh-auth-stub=1' })
+      res.end()
+    } else {
+      res.writeHead(401, { 'content-type': 'text/plain' })
+      res.end('dsh web authentication required')
+    }
+    return
+  }
   res.writeHead(200, { 'content-type': 'application/json' })
   res.end(JSON.stringify({ ok: true, pid: process.pid, port, runtime: 'node' }))
-  if (String(req.url || '').includes('action=stop-self')) {
+  if (url.includes('action=stop-self')) {
     setImmediate(() => server.close(() => process.exit(0)))
   }
 })
 server.listen(port, '127.0.0.1', () => {
-  const announce = () => console.log('dsh web: http://127.0.0.1:' + port + '/?token=TESTTOKEN')
+  const announce = () => console.log('dsh web: http://127.0.0.1:' + port + '/?token=' + token)
   try {
     fs.writeFileSync(path.join(__dirname, 'fake-dsh-' + port + '.pid'), String(process.pid))
   } catch (error) {}
@@ -840,14 +857,45 @@ test('action=restart hands the current instance over to a persistent session, th
       assert.equal(r.json.port, port)
       assert.equal(r.json.session.tool, 'tmux')
       assert.match(r.json.session.name, /^dshim-/)
-      // 跳转目标带替代实例的启动 token，浏览器落到那里时不必再登录一次。
-      assert.equal(r.json.url, 'http://127.0.0.1:' + port + '/?token=TESTTOKEN')
+      // 跳转目标带替代实例自己的启动 token（假 dsh 按进程生成），浏览器落到那里时
+      // 不必再登录一次。
+      assert.match(r.json.url, new RegExp('^http://127\\.0\\.0\\.1:' + port + '/\\?token=TOKEN\\d+$'))
       assert.equal(r.json.bin, path.join(dir, 'dsh'),
         '没有 profile 启动器时，会话里执行的是 PATH 上的 dsh web')
       // 取代者就绪后旧进程必须退出，否则面板会一直留在旧端口上。
       assert.deepEqual(exits, [0])
       assert.match(fs.readFileSync(path.join(home, 'launcher', 'logs', 'server-' + port + '.out.log'), 'utf8'),
         /dsh web:/, '替代实例的启动输出落在按端口命名的日志里')
+    })
+  })
+})
+
+test('action=restart ignores a token the previous process on that port left in the log', async () => {
+  await withTempHome(async ({ home, exits }) => {
+    await withSessionTools(async ({ dir }) => {
+      // 替代实例先应答 action=self、后写 token 行：交接发生在只有旧行的那一刻。
+      fs.writeFileSync(path.join(dir, 'slow-token'), '')
+      const port = await freePort()
+      // 启动日志按端口命名且是追加的：这个端口上一代实例的 token 行仍在文件里，重启
+      // 复用同一端口后它排在新行之前。它格式完全合法，却是上一代进程的，浏览器带着
+      // 它过去只会落到 401。
+      const logDir = path.join(home, 'launcher', 'logs')
+      fs.mkdirSync(logDir, { recursive: true })
+      fs.writeFileSync(path.join(logDir, 'server-' + port + '.out.log'),
+        'dsh web: http://127.0.0.1:' + port + '/?token=STALETOKEN\n')
+      const r = await callApiFull({
+        query: 'action=restart&port=3600',
+        method: 'POST',
+        remoteAddress: '127.0.0.1',
+        config: { startup: { portRange: String(port) } },
+        port: 3600
+      })
+      assert.equal(r.status, 200)
+      assert.equal(r.json.code, 'handoff')
+      assert.doesNotMatch(r.json.url, /STALETOKEN/,
+        '上一代进程的 token 不能交给浏览器：它已被替代实例以 401 拒绝')
+      assert.match(r.json.url, /token=TOKEN\d+$/)
+      assert.deepEqual(exits, [0], '交接成功时旧进程照常退出')
     })
   })
 })

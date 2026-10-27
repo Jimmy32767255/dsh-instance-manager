@@ -13,6 +13,7 @@ For Chinese, see [CHANGELOG.md](CHANGELOG.md).
 ### Fixed
 
 - The launcher may come from `dsh` on `PATH`, fixing "dsh launcher not found" on machines that only have the global install.
+- Handoff accepts only the launch token the replacement wrote after its own start, and confirms it exchanges for a cookie before the browser is sent there, so the token a previous process left on that port is never handed over.
 
 ## 0.12.0 - 2026-10-19
 
